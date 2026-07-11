@@ -132,7 +132,10 @@ class CaptchaSolver:
     def extract_problem_from_text_sync(self, text: str) -> Optional[MathProblem]:
         normalized = self._normalize_text(text)
         patterns = [
+            r"([SsZzOoTtIl|Bbgq])\s*([+\-*/xX×÷])\s*(-?\d+(?:\.\d+)?)\s*(?:=|等于|是多少|多少|\?)?",
+            r"([SsZzOoTtIl|Bbgq])\s*([+\-*/xX×÷])\s*([SsZzOoTtIl|Bbgq])\s*(?:=|等于|是多少|多少|\?)?",
             r"(-?\d+(?:\.\d+)?)\s*([+\-*/xX×÷])\s*(-?\d+(?:\.\d+)?)\s*(?:=|等于|是多少|多少|\?)?",
+            r"(-?\d+(?:\.\d+)?)\s*([+\-*/xX×÷])\s*([SsZzOoTtIl|Bbgq])\s*(?:=|等于|是多少|多少|\?)?",
             r"计算结果\D*(-?\d+(?:\.\d+)?)\s*([+\-*/xX×÷])\s*(-?\d+(?:\.\d+)?)",
             r"(-?\d+(?:\.\d+)?)\s*(加|减|乘|除)\s*(-?\d+(?:\.\d+)?)",
         ]
@@ -142,9 +145,13 @@ class CaptchaSolver:
             if not match:
                 continue
 
-            left = float(match.group(1))
+            left = self.parse_ocr_number(match.group(1))
+            if left is None:
+                continue
             operator = match.group(2)
-            right = float(match.group(3))
+            right = self.parse_ocr_number(match.group(3))
+            if right is None:
+                continue
             result = self.calculate(left, right, operator)
             if result is None:
                 continue
@@ -162,6 +169,13 @@ class CaptchaSolver:
             logger.info("Using missing-left zero division fallback for OCR text: %r", text)
             return fallback_problem
 
+        return None
+
+    def parse_ocr_number(self, value: str) -> Optional[float]:
+        normalized = self.clean_ocr_text_variants(value)
+        for item in normalized:
+            if re.fullmatch(r"-?\d+(?:\.\d+)?", item):
+                return float(item)
         return None
 
     def extract_missing_left_zero_division(self, text: str) -> Optional[MathProblem]:
@@ -187,20 +201,20 @@ class CaptchaSolver:
             return None
 
         try:
-            image = Image.open(image_path).convert("L")
+            image = Image.open(image_path).convert("RGB")
             candidates: list[tuple[int, str, str, str]] = []
+            whitelist = "0123456789+-*/xX×÷=?SsZzOoTtIl|Bbgq"
             configs = [
-                "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789+-*/xX×÷=?",
-                "--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789+-*/xX×÷=?",
-                "--oem 3 --psm 13 -c tessedit_char_whitelist=0123456789+-*/xX×÷=?",
-                "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789+-*/xX×÷=?",
+                f"--oem 3 --psm 7 -c tessedit_char_whitelist={whitelist}",
+                f"--oem 3 --psm 8 -c tessedit_char_whitelist={whitelist}",
+                f"--oem 3 --psm 13 -c tessedit_char_whitelist={whitelist}",
+                f"--oem 3 --psm 6 -c tessedit_char_whitelist={whitelist}",
             ]
 
             for variant_name, variant in self.build_ocr_variants(image):
                 for config in configs:
                     raw_text = pytesseract.image_to_string(variant, config=config)
-                    clean_text = self.clean_ocr_text(raw_text)
-                    if clean_text:
+                    for clean_text in self.clean_ocr_text_variants(raw_text):
                         candidates.append((self.score_ocr_text(clean_text), clean_text, variant_name, config))
 
             if not candidates:
@@ -224,6 +238,8 @@ class CaptchaSolver:
             return None
 
     def build_ocr_variants(self, image):
+        blue_strokes = self.extract_blue_strokes(image) if image.mode == "RGB" else None
+        image = image.convert("L")
         scale = 5 if max(image.size) < 220 else 3
         resized = image.resize((image.width * scale, image.height * scale), self._resample_filter())
         contrasted = ImageOps.autocontrast(resized)
@@ -237,12 +253,60 @@ class CaptchaSolver:
             ("sharp", self.add_ocr_border(sharpened)),
         ]
 
+        if blue_strokes:
+            blue_resized = blue_strokes.resize(
+                (blue_strokes.width * scale, blue_strokes.height * scale),
+                self._resample_filter(),
+            )
+            blue_cropped = self.crop_to_content(blue_resized)
+            blue_thick = blue_cropped.filter(ImageFilter.MinFilter(3))
+            blue_thin = blue_cropped.filter(ImageFilter.MaxFilter(3))
+            variants.insert(0, ("blue-strokes", self.add_ocr_border(blue_resized)))
+            variants.insert(0, ("blue-strokes-crop", self.add_ocr_border(blue_cropped)))
+            variants.insert(0, ("blue-strokes-thick", self.add_ocr_border(blue_thick)))
+            variants.insert(0, ("blue-strokes-thin", self.add_ocr_border(blue_thin)))
+            for threshold in (80, 120, 160, 200):
+                blue_binary = blue_cropped.point(lambda value, t=threshold: 255 if value > t else 0, mode="1").convert("L")
+                variants.insert(0, (f"blue-binary-{threshold}", self.add_ocr_border(blue_binary)))
+
         for threshold in (80, 100, 120, 140, 160, 180, 200):
             binary = sharpened.point(lambda value, t=threshold: 255 if value > t else 0, mode="1").convert("L")
             variants.append((f"binary-{threshold}", self.add_ocr_border(binary)))
             variants.append((f"invert-binary-{threshold}", self.add_ocr_border(ImageOps.invert(binary))))
 
         return variants
+
+    def extract_blue_strokes(self, image):
+        pixels = []
+        blue_pixels = 0
+        for red, green, blue in image.getdata():
+            is_blue = blue > 80 and blue - max(red, green) > 25 and blue > red * 1.15
+            if is_blue:
+                pixels.append(0)
+                blue_pixels += 1
+            else:
+                pixels.append(255)
+
+        if blue_pixels < 8:
+            return None
+
+        mask = Image.new("L", image.size, 255)
+        mask.putdata(pixels)
+        return self.crop_to_content(mask)
+
+    def crop_to_content(self, image):
+        content_mask = image.point(lambda value: 255 if value < 245 else 0)
+        bbox = content_mask.getbbox()
+        if not bbox:
+            return image
+
+        left, top, right, bottom = bbox
+        margin = 8
+        left = max(0, left - margin)
+        top = max(0, top - margin)
+        right = min(image.width, right + margin)
+        bottom = min(image.height, bottom + margin)
+        return image.crop((left, top, right, bottom))
 
     def add_ocr_border(self, image):
         return ImageOps.expand(image, border=24, fill=255)
@@ -261,11 +325,40 @@ class CaptchaSolver:
             .replace("–", "-")
         )
 
+    def clean_ocr_text_variants(self, text: str) -> set[str]:
+        base = self.clean_ocr_text(text)
+        if not base:
+            return set()
+
+        variants = {base}
+        translated = base.translate(str.maketrans({
+            "S": "5",
+            "s": "5",
+            "Z": "2",
+            "z": "2",
+            "I": "1",
+            "l": "1",
+            "|": "1",
+            "B": "8",
+            "b": "6",
+            "g": "9",
+            "q": "9",
+        }))
+        variants.add(translated)
+
+        for candidate in list(variants):
+            variants.add(re.sub(r"(?<=\d)[Tt](?=\d)", "+", candidate))
+            variants.add(re.sub(r"(?<=\d)[Tt](?=[=？?])", "+", candidate))
+            variants.add(re.sub(r"(?<=[=？?])[Tt](?=\d)", "+", candidate))
+            variants.add(candidate.replace("T", "+").replace("t", "+"))
+
+        return {item for item in variants if item}
+
     def score_ocr_text(self, text: str) -> int:
         normalized = self._normalize_text(text)
         score = 0
         if re.search(r"-?\d+(?:\.\d+)?\s*[+\-*/xX×÷]\s*-?\d+(?:\.\d+)?", normalized):
-            score += 100
+            score += 1000 if self.extract_problem_from_text_sync(normalized) else 100
         if re.search(r"^\s*[/÷]\s*\d+(?:\.\d+)?\s*(?:=|\?)?\s*\??\s*$", normalized):
             score += 60
         score += len(re.findall(r"\d", normalized)) * 5
