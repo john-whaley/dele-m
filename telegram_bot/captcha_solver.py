@@ -10,12 +10,15 @@ from telethon.tl.types import Message, MessageMediaPhoto
 
 try:
     import pytesseract
-    from PIL import Image
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
     OCR_AVAILABLE = True
 except ImportError:
     pytesseract = None
     Image = None
+    ImageEnhance = None
+    ImageFilter = None
+    ImageOps = None
     OCR_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
@@ -185,11 +188,97 @@ class CaptchaSolver:
 
         try:
             image = Image.open(image_path).convert("L")
-            config = "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789+-*/xX×÷=?"
-            return pytesseract.image_to_string(image, config=config).strip()
+            candidates: list[tuple[int, str, str, str]] = []
+            configs = [
+                "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789+-*/xX×÷=?",
+                "--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789+-*/xX×÷=?",
+                "--oem 3 --psm 13 -c tessedit_char_whitelist=0123456789+-*/xX×÷=?",
+                "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789+-*/xX×÷=?",
+            ]
+
+            for variant_name, variant in self.build_ocr_variants(image):
+                for config in configs:
+                    raw_text = pytesseract.image_to_string(variant, config=config)
+                    clean_text = self.clean_ocr_text(raw_text)
+                    if clean_text:
+                        candidates.append((self.score_ocr_text(clean_text), clean_text, variant_name, config))
+
+            if not candidates:
+                return None
+
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            best_score, best_text, best_variant, best_config = candidates[0]
+            if self.config.debug:
+                logger.info(
+                    "OCR best candidate score=%s variant=%s config=%s text=%r",
+                    best_score,
+                    best_variant,
+                    best_config,
+                    best_text,
+                )
+                logger.info("OCR candidates: %s", [(score, text, variant) for score, text, variant, _ in candidates[:5]])
+
+            return best_text
         except Exception:
             logger.exception("OCR failed")
             return None
+
+    def build_ocr_variants(self, image):
+        scale = 5 if max(image.size) < 220 else 3
+        resized = image.resize((image.width * scale, image.height * scale), self._resample_filter())
+        contrasted = ImageOps.autocontrast(resized)
+        high_contrast = ImageEnhance.Contrast(contrasted).enhance(2.0)
+        sharpened = ImageEnhance.Sharpness(high_contrast).enhance(2.5).filter(ImageFilter.SHARPEN)
+
+        variants = [
+            ("gray", self.add_ocr_border(resized)),
+            ("contrast", self.add_ocr_border(contrasted)),
+            ("high-contrast", self.add_ocr_border(high_contrast)),
+            ("sharp", self.add_ocr_border(sharpened)),
+        ]
+
+        for threshold in (80, 100, 120, 140, 160, 180, 200):
+            binary = sharpened.point(lambda value, t=threshold: 255 if value > t else 0, mode="1").convert("L")
+            variants.append((f"binary-{threshold}", self.add_ocr_border(binary)))
+            variants.append((f"invert-binary-{threshold}", self.add_ocr_border(ImageOps.invert(binary))))
+
+        return variants
+
+    def add_ocr_border(self, image):
+        return ImageOps.expand(image, border=24, fill=255)
+
+    def clean_ocr_text(self, text: str) -> str:
+        return (
+            text.strip()
+            .replace(" ", "")
+            .replace("\n", "")
+            .replace("\r", "")
+            .replace("O", "0")
+            .replace("o", "0")
+            .replace("＝", "=")
+            .replace("？", "?")
+            .replace("—", "-")
+            .replace("–", "-")
+        )
+
+    def score_ocr_text(self, text: str) -> int:
+        normalized = self._normalize_text(text)
+        score = 0
+        if re.search(r"-?\d+(?:\.\d+)?\s*[+\-*/xX×÷]\s*-?\d+(?:\.\d+)?", normalized):
+            score += 100
+        if re.search(r"^\s*[/÷]\s*\d+(?:\.\d+)?\s*(?:=|\?)?\s*\??\s*$", normalized):
+            score += 60
+        score += len(re.findall(r"\d", normalized)) * 5
+        score += len(re.findall(r"[+\-*/xX×÷]", normalized)) * 10
+        if "=" in normalized:
+            score += 3
+        if "?" in normalized:
+            score += 3
+        score -= max(0, len(normalized) - 14)
+        return score
+
+    def _resample_filter(self):
+        return getattr(getattr(Image, "Resampling", Image), "LANCZOS")
 
     async def find_answer_button(self, message: Message, answer: float) -> Optional[tuple[int, int]]:
         if not message.buttons:
