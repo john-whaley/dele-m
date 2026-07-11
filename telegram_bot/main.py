@@ -39,7 +39,7 @@ class TelegramCaptchaBot:
         logger.info("CAPTCHA_ENABLED=%s", self.captcha_config.enabled)
         logger.info("CAPTCHA_DEBUG=%s", self.captcha_config.debug)
         logger.info("CAPTCHA_CHATS=%s", self.captcha_config.chats or "all visible chats")
-        logger.info("CAPTCHA_BOTS=%s", sorted(self.captcha_config.bot_usernames) or "all senders")
+        logger.info("CAPTCHA_BOT_IDS=%s", sorted(self.captcha_config.bot_ids) or "all senders")
         logger.info("CAPTCHA_CLICK_DELAY=%ss", self.captcha_config.click_delay)
         logger.info("CAPTCHA_OCR=%s", self.captcha_config.ocr_enabled)
 
@@ -81,15 +81,13 @@ class TelegramCaptchaBot:
         return False
 
     async def is_watched_sender(self, event: events.NewMessage.Event) -> bool:
-        if not self.captcha_config.bot_usernames:
+        if not self.captcha_config.bot_ids:
             return True
 
-        sender = await event.get_sender()
-        username = getattr(sender, "username", None)
-        if not username:
+        if event.sender_id is None:
             return False
 
-        return username.lower() in self.captcha_config.bot_usernames
+        return int(event.sender_id) in self.captcha_config.bot_ids
 
     async def print_stats_periodically(self) -> None:
         while True:

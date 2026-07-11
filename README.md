@@ -76,7 +76,7 @@ cp docker-compose.example.yml docker-compose.yml
 TELEGRAM_API_ID: "你的_api_id"
 TELEGRAM_API_HASH: "你的_api_hash"
 TG_SESSION: "本地生成的_string_session"
-CAPTCHA_BOTS: "easfake"
+CAPTCHA_BOT_IDS: "7693083856"
 CAPTCHA_CHATS: ""
 CAPTCHA_CLICK_DELAY: "15"
 ```
@@ -102,7 +102,7 @@ docker compose logs -f
 - `CAPTCHA_ENABLED`: 是否自动处理验证码，默认 `true`
 - `CAPTCHA_DEBUG`: 是否打印消息详情，默认 `true`
 - `CAPTCHA_CHATS`: 只监听指定群或私聊，逗号分隔；留空表示监听账号可见的所有新消息
-- `CAPTCHA_BOTS`: 只处理指定机器人 username，逗号分隔；留空表示不过滤发送者
+- `CAPTCHA_BOT_IDS`: 只处理指定机器人数字 ID，逗号分隔；留空表示不过滤发送者
 - `CAPTCHA_KEYWORDS`: 触发关键词，逗号分隔
 - `CAPTCHA_CLICK_DELAY`: 找到答案按钮后等待多久再点击，单位秒，默认 `15`
 - `CAPTCHA_OCR`: 是否启用图片 OCR，默认 `false`
@@ -117,16 +117,16 @@ docker compose logs -f
 CAPTCHA_ENABLED=false
 CAPTCHA_DEBUG=true
 CAPTCHA_CHATS=
-CAPTCHA_BOTS=
+CAPTCHA_BOT_IDS=
 ```
 
-看到日志里的 `chat_id` 和 `sender_username` 后，再收紧配置：
+看到日志里的 `chat_id` 和 `sender_id` 后，再收紧配置：
 
 ```env
 CAPTCHA_ENABLED=true
 CAPTCHA_DEBUG=true
 CAPTCHA_CHATS=-1001234567890
-CAPTCHA_BOTS=easfake
+CAPTCHA_BOT_IDS=7693083856
 CAPTCHA_CLICK_DELAY=15
 ```
 

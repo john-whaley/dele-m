@@ -49,7 +49,7 @@ class CaptchaConfig:
     enabled: bool = True
     debug: bool = False
     chats: list[str] = field(default_factory=list)
-    bot_usernames: set[str] = field(default_factory=set)
+    bot_ids: set[int] = field(default_factory=set)
     trigger_keywords: list[str] = field(
         default_factory=lambda: [
             "human verification",
@@ -75,9 +75,9 @@ class CaptchaConfig:
         config.enabled = parse_bool("CAPTCHA_ENABLED", True)
         config.debug = parse_bool("CAPTCHA_DEBUG", False)
         config.chats = parse_csv(os.getenv("CAPTCHA_CHATS") or os.getenv("WATCH_CHATS"))
-        config.bot_usernames = {
-            item.lstrip("@").lower()
-            for item in parse_csv(os.getenv("CAPTCHA_BOTS") or os.getenv("BOT_USERNAMES"))
+        config.bot_ids = {
+            int(item)
+            for item in parse_csv(os.getenv("CAPTCHA_BOT_IDS"))
         }
 
         keywords = parse_csv(os.getenv("CAPTCHA_KEYWORDS"))
