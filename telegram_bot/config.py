@@ -64,6 +64,7 @@ class CaptchaConfig:
         ]
     )
     answer_timeout: int = 20
+    click_delay: float = 15.0
     ocr_enabled: bool = False
     download_dir: Path = Path("downloads")
     stats_interval: int = 60
@@ -89,6 +90,10 @@ class CaptchaConfig:
         timeout = os.getenv("CAPTCHA_TIMEOUT")
         if timeout:
             config.answer_timeout = int(timeout)
+
+        click_delay = os.getenv("CAPTCHA_CLICK_DELAY")
+        if click_delay:
+            config.click_delay = float(click_delay)
 
         stats_interval = os.getenv("STATS_INTERVAL")
         if stats_interval:

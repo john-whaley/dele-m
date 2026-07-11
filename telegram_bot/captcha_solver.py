@@ -74,8 +74,14 @@ class CaptchaSolver:
                 return False
 
             row, col = button_pos
-            logger.info("Clicking button [%s][%s]: %s", row, col, message.buttons[row][col].text)
-            await asyncio.sleep(1)
+            logger.info(
+                "Clicking button [%s][%s] after %.1fs: %s",
+                row,
+                col,
+                self.config.click_delay,
+                message.buttons[row][col].text,
+            )
+            await asyncio.sleep(self.config.click_delay)
             await message.click(row, col)
             self.stats["success"] += 1
             logger.info("Captcha handled successfully")
