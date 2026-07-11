@@ -230,7 +230,7 @@ class CaptchaSolver:
                     best_config,
                     best_text,
                 )
-                logger.info("OCR candidates: %s", [(score, text, variant) for score, text, variant, _ in candidates[:5]])
+                logger.info("OCR candidates: %s", [(score, text, variant) for score, text, variant, _ in candidates[:8]])
 
             return best_text
         except Exception:
@@ -238,19 +238,34 @@ class CaptchaSolver:
             return None
 
     def build_ocr_variants(self, image):
+        regions = [("full", image)]
+        if image.mode == "RGB":
+            for index, panel in enumerate(self.crop_light_panels(image)):
+                regions.insert(0, (f"panel-{index}", panel))
+
+        variants = []
+        for region_name, region in regions:
+            variants.extend(self.build_region_ocr_variants(region_name, region))
+            for angle in (-4, -2, 2, 4):
+                rotated = region.rotate(angle, expand=True, fillcolor=(255, 255, 255))
+                variants.extend(self.build_region_ocr_variants(f"{region_name}:rot{angle}", rotated))
+        return variants
+
+    def build_region_ocr_variants(self, region_name, image):
         blue_strokes = self.extract_blue_strokes(image) if image.mode == "RGB" else None
-        image = image.convert("L")
-        scale = 5 if max(image.size) < 220 else 3
-        resized = image.resize((image.width * scale, image.height * scale), self._resample_filter())
+        blue_difference = self.extract_blue_difference(image) if image.mode == "RGB" else None
+        gray_image = image.convert("L")
+        scale = 6 if max(gray_image.size) < 260 else 4
+        resized = gray_image.resize((gray_image.width * scale, gray_image.height * scale), self._resample_filter())
         contrasted = ImageOps.autocontrast(resized)
-        high_contrast = ImageEnhance.Contrast(contrasted).enhance(2.0)
-        sharpened = ImageEnhance.Sharpness(high_contrast).enhance(2.5).filter(ImageFilter.SHARPEN)
+        high_contrast = ImageEnhance.Contrast(contrasted).enhance(2.2)
+        sharpened = ImageEnhance.Sharpness(high_contrast).enhance(3.0).filter(ImageFilter.SHARPEN)
 
         variants = [
-            ("gray", self.add_ocr_border(resized)),
-            ("contrast", self.add_ocr_border(contrasted)),
-            ("high-contrast", self.add_ocr_border(high_contrast)),
-            ("sharp", self.add_ocr_border(sharpened)),
+            (f"{region_name}:gray", self.add_ocr_border(resized)),
+            (f"{region_name}:contrast", self.add_ocr_border(contrasted)),
+            (f"{region_name}:high-contrast", self.add_ocr_border(high_contrast)),
+            (f"{region_name}:sharp", self.add_ocr_border(sharpened)),
         ]
 
         if blue_strokes:
@@ -258,29 +273,114 @@ class CaptchaSolver:
                 (blue_strokes.width * scale, blue_strokes.height * scale),
                 self._resample_filter(),
             )
-            blue_cropped = self.crop_to_content(blue_resized)
+            blue_cropped = self.crop_to_content(blue_resized, margin=18)
             blue_thick = blue_cropped.filter(ImageFilter.MinFilter(3))
+            blue_thicker = blue_cropped.filter(ImageFilter.MinFilter(5))
             blue_thin = blue_cropped.filter(ImageFilter.MaxFilter(3))
-            variants.insert(0, ("blue-strokes", self.add_ocr_border(blue_resized)))
-            variants.insert(0, ("blue-strokes-crop", self.add_ocr_border(blue_cropped)))
-            variants.insert(0, ("blue-strokes-thick", self.add_ocr_border(blue_thick)))
-            variants.insert(0, ("blue-strokes-thin", self.add_ocr_border(blue_thin)))
-            for threshold in (80, 120, 160, 200):
+            variants.insert(0, (f"{region_name}:blue-strokes", self.add_ocr_border(blue_resized)))
+            variants.insert(0, (f"{region_name}:blue-strokes-crop", self.add_ocr_border(blue_cropped)))
+            variants.insert(0, (f"{region_name}:blue-strokes-thick", self.add_ocr_border(blue_thick)))
+            variants.insert(0, (f"{region_name}:blue-strokes-thicker", self.add_ocr_border(blue_thicker)))
+            variants.insert(0, (f"{region_name}:blue-strokes-thin", self.add_ocr_border(blue_thin)))
+            for threshold in (70, 90, 110, 130, 150, 180, 210):
                 blue_binary = blue_cropped.point(lambda value, t=threshold: 255 if value > t else 0, mode="1").convert("L")
-                variants.insert(0, (f"blue-binary-{threshold}", self.add_ocr_border(blue_binary)))
+                variants.insert(0, (f"{region_name}:blue-binary-{threshold}", self.add_ocr_border(blue_binary)))
+
+        if blue_difference:
+            diff_resized = blue_difference.resize(
+                (blue_difference.width * scale, blue_difference.height * scale),
+                self._resample_filter(),
+            )
+            diff_cropped = self.crop_to_content(diff_resized, margin=18)
+            variants.insert(0, (f"{region_name}:blue-diff", self.add_ocr_border(diff_resized)))
+            variants.insert(0, (f"{region_name}:blue-diff-crop", self.add_ocr_border(diff_cropped)))
+            variants.insert(0, (f"{region_name}:blue-diff-thick", self.add_ocr_border(diff_cropped.filter(ImageFilter.MinFilter(3)))))
+            variants.insert(0, (f"{region_name}:blue-diff-thin", self.add_ocr_border(diff_cropped.filter(ImageFilter.MaxFilter(3)))))
+            for threshold in (70, 100, 130, 160, 190):
+                diff_binary = diff_cropped.point(lambda value, t=threshold: 255 if value > t else 0, mode="1").convert("L")
+                variants.insert(0, (f"{region_name}:blue-diff-binary-{threshold}", self.add_ocr_border(diff_binary)))
 
         for threshold in (80, 100, 120, 140, 160, 180, 200):
             binary = sharpened.point(lambda value, t=threshold: 255 if value > t else 0, mode="1").convert("L")
-            variants.append((f"binary-{threshold}", self.add_ocr_border(binary)))
-            variants.append((f"invert-binary-{threshold}", self.add_ocr_border(ImageOps.invert(binary))))
+            variants.append((f"{region_name}:binary-{threshold}", self.add_ocr_border(binary)))
+            variants.append((f"{region_name}:invert-binary-{threshold}", self.add_ocr_border(ImageOps.invert(binary))))
 
         return variants
+
+    def crop_light_panels(self, image):
+        width, height = image.size
+        visited = set()
+        boxes = []
+        pixels = image.load()
+
+        step = max(4, min(width, height) // 160)
+        for y in range(0, height, step):
+            for x in range(0, width, step):
+                key = (x // step, y // step)
+                if key in visited:
+                    continue
+
+                red, green, blue = pixels[x, y]
+                if not self.is_light_panel_pixel(red, green, blue):
+                    continue
+
+                stack = [key]
+                visited.add(key)
+                min_x = max_x = key[0]
+                min_y = max_y = key[1]
+                count = 0
+
+                while stack:
+                    cx, cy = stack.pop()
+                    count += 1
+                    min_x = min(min_x, cx)
+                    max_x = max(max_x, cx)
+                    min_y = min(min_y, cy)
+                    max_y = max(max_y, cy)
+
+                    for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+                        if nx < 0 or ny < 0 or nx * step >= width or ny * step >= height:
+                            continue
+                        next_key = (nx, ny)
+                        if next_key in visited:
+                            continue
+                        nr, ng, nb = pixels[nx * step, ny * step]
+                        if self.is_light_panel_pixel(nr, ng, nb):
+                            visited.add(next_key)
+                            stack.append(next_key)
+
+                box_width = (max_x - min_x + 1) * step
+                box_height = (max_y - min_y + 1) * step
+                area = box_width * box_height
+                if area < width * height * 0.03 or box_width < width * 0.25 or box_height < height * 0.06:
+                    continue
+                if box_width / max(1, box_height) < 1.8:
+                    continue
+
+                margin = int(step * 3)
+                left = max(0, min_x * step - margin)
+                top = max(0, min_y * step - margin)
+                right = min(width, (max_x + 1) * step + margin)
+                bottom = min(height, (max_y + 1) * step + margin)
+                boxes.append((area, left, top, right, bottom))
+
+        panels = []
+        for _, left, top, right, bottom in sorted(boxes, reverse=True)[:3]:
+            panel = image.crop((left, top, right, bottom))
+            if self.extract_blue_strokes(panel):
+                panels.append(panel)
+        return panels
+
+    def is_light_panel_pixel(self, red: int, green: int, blue: int) -> bool:
+        brightness = (red + green + blue) / 3
+        spread = max(red, green, blue) - min(red, green, blue)
+        return brightness > 155 and spread < 75 and red > 130 and green > 130 and blue > 120
 
     def extract_blue_strokes(self, image):
         pixels = []
         blue_pixels = 0
         for red, green, blue in image.getdata():
-            is_blue = blue > 80 and blue - max(red, green) > 25 and blue > red * 1.15
+            is_blue = blue > 70 and blue - red > 18 and blue - green > 8 and blue > red * 1.08
             if is_blue:
                 pixels.append(0)
                 blue_pixels += 1
@@ -292,6 +392,22 @@ class CaptchaSolver:
 
         mask = Image.new("L", image.size, 255)
         mask.putdata(pixels)
+        return self.crop_to_content(mask)
+
+    def extract_blue_difference(self, image):
+        values = []
+        strong_pixels = 0
+        for red, green, blue in image.getdata():
+            diff = max(0, int(blue) - int((red + green) / 2))
+            if diff > 12:
+                strong_pixels += 1
+            values.append(255 - min(255, diff * 5))
+
+        if strong_pixels < 8:
+            return None
+
+        mask = Image.new("L", image.size, 255)
+        mask.putdata(values)
         return self.crop_to_content(mask)
 
     def crop_to_content(self, image):
@@ -358,7 +474,7 @@ class CaptchaSolver:
         normalized = self._normalize_text(text)
         score = 0
         if re.search(r"-?\d+(?:\.\d+)?\s*[+\-*/xX×÷]\s*-?\d+(?:\.\d+)?", normalized):
-            score += 1000 if self.extract_problem_from_text_sync(normalized) else 100
+            score += 2000 if self.extract_problem_from_text_sync(normalized) else 120
         if re.search(r"^\s*[/÷]\s*\d+(?:\.\d+)?\s*(?:=|\?)?\s*\??\s*$", normalized):
             score += 60
         score += len(re.findall(r"\d", normalized)) * 5
