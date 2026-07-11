@@ -410,14 +410,13 @@ class CaptchaSolver:
         mask.putdata(values)
         return self.crop_to_content(mask)
 
-    def crop_to_content(self, image):
+    def crop_to_content(self, image, margin: int = 8):
         content_mask = image.point(lambda value: 255 if value < 245 else 0)
         bbox = content_mask.getbbox()
         if not bbox:
             return image
 
         left, top, right, bottom = bbox
-        margin = 8
         left = max(0, left - margin)
         top = max(0, top - margin)
         right = min(image.width, right + margin)
