@@ -154,7 +154,30 @@ class CaptchaSolver:
                 result=result,
             )
 
+        fallback_problem = self.extract_missing_left_zero_division(normalized)
+        if fallback_problem:
+            logger.info("Using missing-left zero division fallback for OCR text: %r", text)
+            return fallback_problem
+
         return None
+
+    def extract_missing_left_zero_division(self, text: str) -> Optional[MathProblem]:
+        match = re.search(r"^\s*[/÷]\s*(\d+(?:\.\d+)?)\s*(?:=|\?)?\s*\??\s*$", text)
+        if not match:
+            return None
+
+        right = float(match.group(1))
+        if right == 0:
+            return None
+
+        return MathProblem(
+            text=match.group(0),
+            left=0.0,
+            right=right,
+            operator="/",
+            result=0.0,
+            confidence=0.5,
+        )
 
     async def ocr_image(self, image_path: Path) -> Optional[str]:
         if not OCR_AVAILABLE:
