@@ -135,10 +135,8 @@ class CaptchaSolver:
                 logger.info("Downloaded captcha media: %s", path)
                 media_path = Path(path)
                 if self.is_video_path(media_path):
-                    code = await self.ocr_video_code(media_path)
-                    if code:
-                        logger.info("Video OCR code: %r", code)
-                        return CaptchaAnswer(kind="code", value=code, text=code)
+                    logger.info("Skipping video captcha for now: %s", media_path)
+                    return None
                 else:
                     ocr_text = await self.ocr_image(media_path)
                     if ocr_text:
@@ -292,7 +290,7 @@ class CaptchaSolver:
 
         try:
             image = Image.open(image_path).convert("RGB")
-            result = self.ocr_pil_image(image, source=image_path.name)
+            result = self.ocr_math_image(image, source=image_path.name)
             return result[1] if result else None
         except Exception:
             logger.exception("OCR failed")
@@ -446,6 +444,15 @@ class CaptchaSolver:
         return score
 
     def ocr_pil_image(self, image, source: str, log_candidates: bool = True) -> Optional[tuple[int, str, str, str]]:
+        return self.ocr_math_image(image, source=source, log_candidates=log_candidates)
+
+    def ocr_math_image(
+        self,
+        image,
+        source: str,
+        log_candidates: bool = True,
+        expected_result: str | None = None,
+    ) -> Optional[tuple[int, str, str, str]]:
         candidates: list[tuple[int, str, str, str]] = []
         whitelist = "0123456789+-*/xX×÷=?~OoDdQqIiLl|SsZzBbGgTt"
         configs = [
@@ -459,18 +466,21 @@ class CaptchaSolver:
                 raw_text = self.safe_tesseract_image_to_string(variant, config=config)
                 for clean_text in self.clean_ocr_text_variants(raw_text):
                     candidate = (self.score_ocr_text(clean_text), clean_text, f"{source}:{variant_name}", config)
+                    candidate = self.boost_candidate_for_expected_result(candidate, expected_result)
                     candidates.append(candidate)
                     if self.extract_problem_from_text_sync(clean_text):
-                        if self.config.debug and log_candidates:
-                            logger.info("OCR fast matched variant=%s config=%s text=%r", candidate[2], config, clean_text)
-                        return candidate
+                        if expected_result is None or self.candidate_result(candidate[1]) == expected_result:
+                            if self.config.debug and log_candidates:
+                                logger.info("OCR fast matched variant=%s config=%s text=%r", candidate[2], config, clean_text)
+                            return candidate
 
         heavy_configs = configs + [f"--oem 3 --psm 6 -c tessedit_char_whitelist={whitelist}"]
         for variant_name, variant in self.build_slow_math_ocr_variants(image.convert("RGB")):
             for config in heavy_configs:
                 raw_text = self.safe_tesseract_image_to_string(variant, config=config)
                 for clean_text in self.clean_ocr_text_variants(raw_text):
-                    candidates.append((self.score_ocr_text(clean_text), clean_text, f"{source}:{variant_name}", config))
+                    candidate = (self.score_ocr_text(clean_text), clean_text, f"{source}:{variant_name}", config)
+                    candidates.append(self.boost_candidate_for_expected_result(candidate, expected_result))
 
         if not candidates:
             return None
@@ -488,6 +498,26 @@ class CaptchaSolver:
             )
             logger.info("OCR candidates: %s", [(score, text, variant) for score, text, variant, _ in candidates[:8]])
         return best
+
+    def boost_candidate_for_expected_result(
+        self,
+        candidate: tuple[int, str, str, str],
+        expected_result: str | None,
+    ) -> tuple[int, str, str, str]:
+        if expected_result is None:
+            return candidate
+        score, text, variant, config = candidate
+        if self.candidate_result(text) == expected_result:
+            return score + 10000, text, variant, config
+        return candidate
+
+    def candidate_result(self, text: str) -> str | None:
+        problem = self.extract_problem_from_text_sync(text)
+        if not problem:
+            return None
+        if float(problem.result).is_integer():
+            return str(int(problem.result))
+        return str(problem.result)
 
     def safe_tesseract_image_to_string(self, image, config: str) -> str:
         try:
