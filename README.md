@@ -131,3 +131,11 @@ CAPTCHA_CLICK_DELAY=15
 ```
 
 如果验证码题目在图片或动态视频里，再把 `CAPTCHA_OCR=true` 打开。图片验证码会按简单加减乘除算式处理，`.mp4` 等动态验证码会按 4 位字母数字码识别并匹配按钮文本。Dockerfile 已安装 `tesseract-ocr`，Python 依赖里也包含 `Pillow`、`pytesseract` 和 `opencv-python-headless`。修改 OCR 相关依赖后需要重新 `docker compose up -d --build`。
+
+本地或容器里可以用样本目录回归验证 OCR：
+
+```bash
+python tools/verify_samples.py --root viwers
+```
+
+其中 `viwers/img` 的期望答案取文件名前缀数字，`viwers/videos` 的期望答案取文件名。

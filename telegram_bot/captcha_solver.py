@@ -304,7 +304,7 @@ class CaptchaSolver:
 
         for variant_name, variant in self.build_code_ocr_variants(image.convert("RGB")):
             for config in configs:
-                raw_text = pytesseract.image_to_string(variant, config=config)
+                raw_text = self.safe_tesseract_image_to_string(variant, config=config)
                 for code in self.clean_code_text_variants(raw_text):
                     candidates.append((self.score_code_text(code), code, f"{source}:{variant_name}", config))
         return candidates
@@ -334,7 +334,7 @@ class CaptchaSolver:
         variants = []
         for region_name, region in regions:
             variants.extend(self.build_code_region_variants(region_name, region))
-            for angle in (-4, -2, 2, 4):
+            for angle in (-3, 3):
                 rotated = region.rotate(angle, expand=True, fillcolor=(255, 255, 255))
                 variants.extend(self.build_code_region_variants(f"{region_name}:rot{angle}", rotated))
         return variants
@@ -389,12 +389,23 @@ class CaptchaSolver:
             f"--oem 3 --psm 7 -c tessedit_char_whitelist={whitelist}",
             f"--oem 3 --psm 8 -c tessedit_char_whitelist={whitelist}",
             f"--oem 3 --psm 13 -c tessedit_char_whitelist={whitelist}",
-            f"--oem 3 --psm 6 -c tessedit_char_whitelist={whitelist}",
         ]
 
-        for variant_name, variant in self.build_ocr_variants(image.convert("RGB")):
+        for variant_name, variant in self.build_fast_math_ocr_variants(image.convert("RGB")):
             for config in configs:
-                raw_text = pytesseract.image_to_string(variant, config=config)
+                raw_text = self.safe_tesseract_image_to_string(variant, config=config)
+                for clean_text in self.clean_ocr_text_variants(raw_text):
+                    candidate = (self.score_ocr_text(clean_text), clean_text, f"{source}:{variant_name}", config)
+                    candidates.append(candidate)
+                    if self.extract_problem_from_text_sync(clean_text):
+                        if self.config.debug and log_candidates:
+                            logger.info("OCR fast matched variant=%s config=%s text=%r", candidate[2], config, clean_text)
+                        return candidate
+
+        heavy_configs = configs + [f"--oem 3 --psm 6 -c tessedit_char_whitelist={whitelist}"]
+        for variant_name, variant in self.build_slow_math_ocr_variants(image.convert("RGB")):
+            for config in heavy_configs:
+                raw_text = self.safe_tesseract_image_to_string(variant, config=config)
                 for clean_text in self.clean_ocr_text_variants(raw_text):
                     candidates.append((self.score_ocr_text(clean_text), clean_text, f"{source}:{variant_name}", config))
 
@@ -415,6 +426,57 @@ class CaptchaSolver:
             logger.info("OCR candidates: %s", [(score, text, variant) for score, text, variant, _ in candidates[:8]])
         return best
 
+    def safe_tesseract_image_to_string(self, image, config: str) -> str:
+        try:
+            return pytesseract.image_to_string(image, config=config, timeout=4)
+        except RuntimeError as exc:
+            logger.warning("Tesseract timed out or failed: %s", exc)
+            return ""
+
+    def build_fast_math_ocr_variants(self, image):
+        variants = []
+        blue_strokes = self.extract_blue_strokes(image)
+        blue_difference = self.extract_blue_difference(image)
+        for name, mask in (("blue", blue_strokes), ("blue-diff", blue_difference)):
+            if not mask:
+                continue
+            scale = 7 if max(mask.size) < 260 else 5
+            resized = mask.resize((mask.width * scale, mask.height * scale), self._resample_filter())
+            cropped = self.crop_to_content(resized, margin=18)
+            variants.append((f"fast:{name}:crop", self.add_ocr_border(cropped)))
+            variants.append((f"fast:{name}:thick", self.add_ocr_border(cropped.filter(ImageFilter.MinFilter(3)))))
+            variants.append((f"fast:{name}:thin", self.add_ocr_border(cropped.filter(ImageFilter.MaxFilter(3)))))
+            for threshold in (90, 130, 170):
+                binary = cropped.point(lambda value, t=threshold: 255 if value > t else 0, mode="1").convert("L")
+                variants.append((f"fast:{name}:binary-{threshold}", self.add_ocr_border(binary)))
+        if variants:
+            return variants
+
+        gray = image.convert("L")
+        scale = 6 if max(gray.size) < 260 else 4
+        resized = gray.resize((gray.width * scale, gray.height * scale), self._resample_filter())
+        contrasted = ImageOps.autocontrast(resized)
+        variants.append(("fast:gray", self.add_ocr_border(contrasted)))
+        return variants
+
+    def build_slow_math_ocr_variants(self, image):
+        variants = []
+        for variant_name, variant in self.build_fast_math_ocr_variants(image):
+            variants.append((f"slow:{variant_name}", variant))
+            if len(variants) >= 8:
+                return variants
+
+        gray = image.convert("L")
+        scale = 6 if max(gray.size) < 260 else 4
+        resized = gray.resize((gray.width * scale, gray.height * scale), self._resample_filter())
+        contrasted = ImageOps.autocontrast(resized)
+        sharpened = ImageEnhance.Sharpness(contrasted).enhance(2.5).filter(ImageFilter.SHARPEN)
+        for threshold in (100, 140, 180):
+            binary = sharpened.point(lambda value, t=threshold: 255 if value > t else 0, mode="1").convert("L")
+            variants.append((f"slow:binary-{threshold}", self.add_ocr_border(binary)))
+        variants.append(("slow:sharp", self.add_ocr_border(sharpened)))
+        return variants[:10]
+
     def is_video_path(self, path: Path) -> bool:
         return path.suffix.lower() in {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".gif"}
 
@@ -427,7 +489,7 @@ class CaptchaSolver:
         variants = []
         for region_name, region in regions:
             variants.extend(self.build_region_ocr_variants(region_name, region))
-            for angle in (-4, -2, 2, 4):
+            for angle in (-3, 3):
                 rotated = region.rotate(angle, expand=True, fillcolor=(255, 255, 255))
                 variants.extend(self.build_region_ocr_variants(f"{region_name}:rot{angle}", rotated))
         return variants
