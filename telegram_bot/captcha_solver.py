@@ -158,6 +158,10 @@ class CaptchaSolver:
 
     def extract_problem_from_text_sync(self, text: str) -> Optional[MathProblem]:
         normalized = self._normalize_text(text)
+        fixed_problem = self.extract_fixed_digit_problem(normalized)
+        if fixed_problem:
+            return fixed_problem
+
         patterns = [
             r"([SsZzOoTtIl|Bbgq])\s*([+\-*/xX×÷])\s*(-?\d+(?:\.\d+)?)\s*(?:=|等于|是多少|多少|\?)?",
             r"([SsZzOoTtIl|Bbgq])\s*([+\-*/xX×÷])\s*([SsZzOoTtIl|Bbgq])\s*(?:=|等于|是多少|多少|\?)?",
@@ -197,6 +201,65 @@ class CaptchaSolver:
             return fallback_problem
 
         return None
+
+    def extract_fixed_digit_problem(self, text: str) -> Optional[MathProblem]:
+        variants = self.fixed_math_text_variants(text)
+        for variant in variants:
+            match = re.search(r"([0-9])\s*([+\-*/xX×÷])\s*([0-9])\s*(?:=|\?)?\s*\??", variant)
+            if not match:
+                continue
+
+            left = float(match.group(1))
+            operator = match.group(2)
+            right = float(match.group(3))
+            result = self.calculate(left, right, operator)
+            if result is None:
+                continue
+
+            return MathProblem(
+                text=match.group(0),
+                left=left,
+                right=right,
+                operator=operator,
+                result=result,
+                confidence=1.2,
+            )
+        return None
+
+    def fixed_math_text_variants(self, text: str) -> list[str]:
+        compact = self.clean_ocr_text(text)
+        if not compact:
+            return []
+
+        base = compact.translate(str.maketrans({
+            "O": "0",
+            "o": "0",
+            "D": "0",
+            "Q": "0",
+            "I": "1",
+            "l": "1",
+            "|": "1",
+            "S": "5",
+            "s": "5",
+            "Z": "2",
+            "z": "2",
+            "B": "8",
+            "b": "6",
+            "g": "9",
+            "q": "9",
+            "T": "+",
+            "t": "+",
+            "X": "*",
+            "x": "*",
+            "×": "*",
+            "÷": "/",
+            "~": "-",
+        }))
+        variants = {base}
+        variants.add(base.replace("=", ""))
+        variants.add(base.replace("?", ""))
+        variants.add(base.replace("=", "").replace("?", ""))
+        return sorted(variants, key=len)
 
     def parse_ocr_number(self, value: str) -> Optional[float]:
         normalized = self.clean_ocr_text_variants(value)
@@ -384,7 +447,7 @@ class CaptchaSolver:
 
     def ocr_pil_image(self, image, source: str, log_candidates: bool = True) -> Optional[tuple[int, str, str, str]]:
         candidates: list[tuple[int, str, str, str]] = []
-        whitelist = "0123456789+-*/xX×÷=?SsZzOoTtIl|Bbgq"
+        whitelist = "0123456789+-*/xX×÷=?~OoDdQqIiLl|SsZzBbGgTt"
         configs = [
             f"--oem 3 --psm 7 -c tessedit_char_whitelist={whitelist}",
             f"--oem 3 --psm 8 -c tessedit_char_whitelist={whitelist}",
@@ -715,6 +778,8 @@ class CaptchaSolver:
     def score_ocr_text(self, text: str) -> int:
         normalized = self._normalize_text(text)
         score = 0
+        if self.extract_fixed_digit_problem(normalized):
+            score += 3000
         if re.search(r"-?\d+(?:\.\d+)?\s*[+\-*/xX×÷]\s*-?\d+(?:\.\d+)?", normalized):
             score += 2000 if self.extract_problem_from_text_sync(normalized) else 120
         if re.search(r"^\s*[/÷]\s*\d+(?:\.\d+)?\s*(?:=|\?)?\s*\??\s*$", normalized):
