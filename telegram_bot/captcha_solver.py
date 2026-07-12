@@ -126,20 +126,18 @@ class CaptchaSolver:
 
     def is_captcha_message(self, message: Message) -> bool:
         text = message.raw_text or ""
-        text_lower = text.lower()
 
-        if any(keyword.lower() in text_lower for keyword in self.config.trigger_keywords):
+        if self.has_trigger_keyword(text):
             return True
 
         if self.extract_problem_from_text_sync(text):
             return True
 
-        if message.media and isinstance(message.media, MessageMediaPhoto) and (self.config.ocr_enabled or self.config.ai_ocr_enabled):
-            return True
-        if message.media and (self.config.ocr_enabled or self.config.ai_ocr_enabled):
-            return True
-
         return False
+
+    def has_trigger_keyword(self, text: str) -> bool:
+        text_lower = (text or "").lower()
+        return any(keyword.lower() in text_lower for keyword in self.config.trigger_keywords)
 
     async def extract_answer(self, message: Message) -> Optional[CaptchaAnswer]:
         if message.raw_text:
@@ -147,7 +145,8 @@ class CaptchaSolver:
             if problem:
                 return self.answer_from_problem(problem)
 
-        if message.media and (self.config.ocr_enabled or self.config.ai_ocr_enabled):
+        can_read_media = self.has_trigger_keyword(message.raw_text or "")
+        if can_read_media and message.media and (self.config.ocr_enabled or self.config.ai_ocr_enabled):
             path = await message.download_media(file=str(self.download_dir / f"captcha_{message.id}"))
             if path:
                 logger.info("Downloaded captcha media: %s", path)
