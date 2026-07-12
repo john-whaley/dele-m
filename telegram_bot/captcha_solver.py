@@ -452,6 +452,7 @@ class CaptchaSolver:
         source: str,
         log_candidates: bool = True,
         expected_result: str | None = None,
+        expected_expr: str | None = None,
     ) -> Optional[tuple[int, str, str, str]]:
         candidates: list[tuple[int, str, str, str]] = []
         whitelist = "0123456789+-*/xX×÷=?~OoDdQqIiLl|SsZzBbGgTt"
@@ -466,10 +467,10 @@ class CaptchaSolver:
                 raw_text = self.safe_tesseract_image_to_string(variant, config=config)
                 for clean_text in self.clean_ocr_text_variants(raw_text):
                     candidate = (self.score_ocr_text(clean_text), clean_text, f"{source}:{variant_name}", config)
-                    candidate = self.boost_candidate_for_expected_result(candidate, expected_result)
+                    candidate = self.boost_candidate_for_expected_result(candidate, expected_result, expected_expr)
                     candidates.append(candidate)
                     if self.extract_problem_from_text_sync(clean_text):
-                        if expected_result is None or self.candidate_result(candidate[1]) == expected_result:
+                        if self.candidate_matches_expected(candidate[1], expected_result, expected_expr):
                             if self.config.debug and log_candidates:
                                 logger.info("OCR fast matched variant=%s config=%s text=%r", candidate[2], config, clean_text)
                             return candidate
@@ -480,7 +481,7 @@ class CaptchaSolver:
                 raw_text = self.safe_tesseract_image_to_string(variant, config=config)
                 for clean_text in self.clean_ocr_text_variants(raw_text):
                     candidate = (self.score_ocr_text(clean_text), clean_text, f"{source}:{variant_name}", config)
-                    candidates.append(self.boost_candidate_for_expected_result(candidate, expected_result))
+                    candidates.append(self.boost_candidate_for_expected_result(candidate, expected_result, expected_expr))
 
         if not candidates:
             return None
@@ -503,13 +504,32 @@ class CaptchaSolver:
         self,
         candidate: tuple[int, str, str, str],
         expected_result: str | None,
+        expected_expr: str | None = None,
     ) -> tuple[int, str, str, str]:
-        if expected_result is None:
+        if expected_result is None and expected_expr is None:
             return candidate
         score, text, variant, config = candidate
+        if expected_expr is not None and self.candidate_expr(text) == expected_expr:
+            return score + 20000, text, variant, config
         if self.candidate_result(text) == expected_result:
             return score + 10000, text, variant, config
         return candidate
+
+    def candidate_matches_expected(self, text: str, expected_result: str | None, expected_expr: str | None) -> bool:
+        if expected_expr is not None:
+            return self.candidate_expr(text) == expected_expr
+        if expected_result is not None:
+            return self.candidate_result(text) == expected_result
+        return True
+
+    def candidate_expr(self, text: str) -> str | None:
+        problem = self.extract_problem_from_text_sync(text)
+        if not problem:
+            return None
+        left = int(problem.left) if float(problem.left).is_integer() else problem.left
+        right = int(problem.right) if float(problem.right).is_integer() else problem.right
+        result = int(problem.result) if float(problem.result).is_integer() else problem.result
+        return f"{left}{self.normalize_math_operator(problem.operator)}{right}={result}"
 
     def candidate_result(self, text: str) -> str | None:
         problem = self.extract_problem_from_text_sync(text)
@@ -867,6 +887,7 @@ class CaptchaSolver:
         return self.stats.copy()
 
     def calculate(self, left: float, right: float, operator: str) -> Optional[float]:
+        operator = self.normalize_math_operator(operator)
         if operator in {"+", "加"}:
             return left + right
         if operator in {"-", "减"}:
@@ -878,6 +899,9 @@ class CaptchaSolver:
                 return None
             return left / right
         return None
+
+    def normalize_math_operator(self, operator: str) -> str:
+        return {"×": "*", "x": "*", "X": "*", "÷": "/", "~": "-"}.get(operator, operator)
 
     def _normalize_text(self, text: str) -> str:
         return (

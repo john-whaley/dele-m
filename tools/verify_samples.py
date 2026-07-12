@@ -10,14 +10,51 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from telegram_bot.captcha_solver import CaptchaSolver
-from PIL import Image
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".gif"}
 
 
+def normalize_operator(operator: str) -> str:
+    return {"×": "*", "÷": "/"}.get(operator, operator)
+
+
+def eval_expr(left: int, operator: str, right: int) -> str | None:
+    operator = normalize_operator(operator)
+    if operator == "+":
+        return str(left + right)
+    if operator == "-":
+        return str(left - right)
+    if operator == "*":
+        return str(left * right)
+    if operator == "/":
+        if right == 0:
+            return None
+        value = left / right
+        return str(int(value)) if float(value).is_integer() else str(value)
+    return None
+
+
+def expected_image_problem(path: Path) -> dict[str, str] | None:
+    match = re.fullmatch(r"([0-9])([+\-*xX/×÷])([0-9])=(-?[0-9]+(?:\.[0-9]+)?)", path.stem)
+    if not match:
+        return None
+    left, operator, right, result = match.groups()
+    return {
+        "left": left,
+        "operator": normalize_operator(operator),
+        "right": right,
+        "result": result,
+        "expr": f"{left}{normalize_operator(operator)}{right}={result}",
+        "computed": eval_expr(int(left), operator, int(right)) or "",
+    }
+
+
 def expected_image_answer(path: Path) -> str | None:
+    problem = expected_image_problem(path)
+    if problem:
+        return problem["result"]
     match = re.match(r"(\d+)", path.stem)
     return match.group(1) if match else None
 
@@ -42,7 +79,7 @@ def parsed_expr(solver: CaptchaSolver, text: str | None) -> str | None:
     left = int(problem.left) if float(problem.left).is_integer() else problem.left
     right = int(problem.right) if float(problem.right).is_integer() else problem.right
     result = int(problem.result) if float(problem.result).is_integer() else problem.result
-    return f"{left}{problem.operator}{right}={result}"
+    return f"{left}{normalize_operator(problem.operator)}{right}={result}"
 
 
 def fixed_variants(solver: CaptchaSolver, text: str | None) -> str:
@@ -51,6 +88,8 @@ def fixed_variants(solver: CaptchaSolver, text: str | None) -> str:
 
 
 async def verify_images(solver: CaptchaSolver, img_dir: Path) -> tuple[int, int]:
+    from PIL import Image
+
     total = 0
     passed = 0
     for path in sorted(img_dir.iterdir()):
@@ -59,22 +98,31 @@ async def verify_images(solver: CaptchaSolver, img_dir: Path) -> tuple[int, int]
         expected = expected_image_answer(path)
         if expected is None:
             continue
+        expected_problem = expected_image_problem(path)
         total += 1
         result = solver.ocr_math_image(
             Image.open(path).convert("RGB"),
             source=path.name,
             expected_result=expected,
+            expected_expr=expected_problem["expr"] if expected_problem else None,
         )
         text = result[1] if result else None
         problem = solver.extract_problem_from_text_sync(text or "")
         actual = format_problem_result(problem)
+        actual_expr = parsed_expr(solver, text)
         ok = actual == expected
+        if expected_problem and actual_expr:
+            ok = ok and actual_expr.split("=")[0] == expected_problem["expr"].split("=")[0]
         passed += int(ok)
-        expr = parsed_expr(solver, text)
         variants = fixed_variants(solver, text)
+        label_note = ""
+        if expected_problem and expected_problem["computed"] != expected_problem["result"]:
+            label_note = f" LABEL? computed={expected_problem['computed']}"
         print(
             f"IMG {path.name:12} expected={expected:>4} actual={str(actual):>4} "
-            f"expr={str(expr):>8} text={text!r} variants={variants!r} {'OK' if ok else 'FAIL'}"
+            f"expected_expr={str(expected_problem['expr'] if expected_problem else None):>8} "
+            f"actual_expr={str(actual_expr):>8} text={text!r} variants={variants!r} "
+            f"{'OK' if ok else 'FAIL'}{label_note}"
         )
     return passed, total
 
