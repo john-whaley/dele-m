@@ -13,6 +13,13 @@ services:
       CAPTCHA_KEYWORDS: "人机验证,请选择计算结果,完成验证,验证码"
       CAPTCHA_CLICK_DELAY: "15"
       CAPTCHA_OCR: "false"
+      CAPTCHA_AI_OCR: "false"
+      CAPTCHA_AI_API_KEY: ""
+      CAPTCHA_AI_BASE_URL: "https://api.openai.com/v1/chat/completions"
+      CAPTCHA_AI_MODEL: "gpt-4o-mini"
+      CAPTCHA_AI_PROMPT: "图片中的公式及结果是多少？"
+      CAPTCHA_AI_MODE: "fallback"
+      CAPTCHA_AI_TIMEOUT: "30"
       DOWNLOAD_DIR: "/app/downloads"
     volumes:
       - ./downloads:/app/downloads

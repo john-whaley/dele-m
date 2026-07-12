@@ -1,9 +1,19 @@
 import asyncio
+import base64
 import logging
+import mimetypes
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+try:
+    import requests
+
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    requests = None
+    REQUESTS_AVAILABLE = False
 
 from telethon import events
 from telethon.tl.types import Message, MessageMediaPhoto
@@ -63,6 +73,10 @@ class CaptchaSolver:
             logger.warning("CAPTCHA_OCR is enabled, but Pillow/pytesseract is not available")
         if self.config.ocr_enabled and not VIDEO_OCR_AVAILABLE:
             logger.info("Video OCR is unavailable because opencv-python-headless is not installed")
+        if self.config.ai_ocr_enabled and not self.config.ai_api_key:
+            logger.warning("CAPTCHA_AI_OCR is enabled, but CAPTCHA_AI_API_KEY/OPENAI_API_KEY is empty")
+        if self.config.ai_ocr_enabled and not REQUESTS_AVAILABLE:
+            logger.warning("CAPTCHA_AI_OCR is enabled, but requests is not installed")
         if OCR_AVAILABLE:
             self.load_glyph_templates()
 
@@ -120,9 +134,9 @@ class CaptchaSolver:
         if self.extract_problem_from_text_sync(text):
             return True
 
-        if message.media and isinstance(message.media, MessageMediaPhoto) and self.config.ocr_enabled:
+        if message.media and isinstance(message.media, MessageMediaPhoto) and (self.config.ocr_enabled or self.config.ai_ocr_enabled):
             return True
-        if message.media and self.config.ocr_enabled:
+        if message.media and (self.config.ocr_enabled or self.config.ai_ocr_enabled):
             return True
 
         return False
@@ -133,7 +147,7 @@ class CaptchaSolver:
             if problem:
                 return self.answer_from_problem(problem)
 
-        if message.media and self.config.ocr_enabled and OCR_AVAILABLE:
+        if message.media and (self.config.ocr_enabled or self.config.ai_ocr_enabled):
             path = await message.download_media(file=str(self.download_dir / f"captcha_{message.id}"))
             if path:
                 logger.info("Downloaded captcha media: %s", path)
@@ -142,18 +156,25 @@ class CaptchaSolver:
                     logger.info("Skipping video captcha for now: %s", media_path)
                     return None
                 else:
-                    ocr_text = await self.ocr_image(media_path)
+                    ocr_text = await self.recognize_image(media_path)
                     if ocr_text:
                         logger.info("OCR text: %r", ocr_text)
                         problem = await self.extract_problem_from_text(ocr_text)
                         if problem:
                             return self.answer_from_problem(problem)
+                        direct_answer = self.extract_direct_answer(ocr_text)
+                        if direct_answer is not None:
+                            return CaptchaAnswer(kind="math", value=direct_answer, text=ocr_text, confidence=0.8)
 
         return None
 
     def answer_from_problem(self, problem: MathProblem) -> CaptchaAnswer:
         text = f"{self._format_number(problem.left)} {problem.operator} {self._format_number(problem.right)} = {self._format_number(problem.result)}"
         return CaptchaAnswer(kind="math", value=problem.result, text=text, confidence=problem.confidence)
+
+    def extract_direct_answer(self, text: str) -> Optional[float]:
+        match = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*", text)
+        return float(match.group(1)) if match else None
 
     async def extract_problem_from_text(self, text: str) -> Optional[MathProblem]:
         return self.extract_problem_from_text_sync(text)
@@ -303,6 +324,70 @@ class CaptchaSolver:
         except Exception:
             logger.exception("OCR failed")
             return None
+
+    async def recognize_image(self, image_path: Path) -> Optional[str]:
+        if self.config.ai_ocr_enabled and self.config.ai_mode == "always":
+            ai_text = await self.ai_ocr_image(image_path)
+            if ai_text:
+                return ai_text
+
+        local_text = None
+        if self.config.ocr_enabled and OCR_AVAILABLE:
+            local_text = await self.ocr_image(image_path)
+            if local_text and self.extract_problem_from_text_sync(local_text):
+                return local_text
+
+        if self.config.ai_ocr_enabled:
+            ai_text = await self.ai_ocr_image(image_path)
+            if ai_text:
+                return ai_text
+
+        return local_text
+
+    async def ai_ocr_image(self, image_path: Path) -> Optional[str]:
+        if not self.config.ai_api_key:
+            return None
+        if not REQUESTS_AVAILABLE:
+            return None
+        try:
+            return await asyncio.to_thread(self.ai_ocr_image_sync, image_path)
+        except Exception:
+            logger.exception("AI OCR failed")
+            return None
+
+    def ai_ocr_image_sync(self, image_path: Path) -> Optional[str]:
+        mime_type = mimetypes.guess_type(str(image_path))[0] or "image/jpeg"
+        image_b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        prompt = (
+            f"{self.config.ai_prompt}\n"
+            "Return only the expression and answer if visible. "
+            "Prefer format like 3+6=? or 3+6=9 or 9. "
+            "Do not include explanation."
+        )
+        payload = {
+            "model": self.config.ai_model,
+            "temperature": 0,
+            "max_tokens": 20,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}},
+                ],
+            }],
+        }
+        response = requests.post(
+            self.config.ai_base_url,
+            headers={"Authorization": f"Bearer {self.config.ai_api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=self.config.ai_timeout,
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        ai_text = self.clean_ai_ocr_text(content)
+        if ai_text:
+            logger.info("AI OCR text: %r", ai_text)
+        return ai_text
 
     async def ocr_video_code(self, video_path: Path) -> Optional[str]:
         if not OCR_AVAILABLE or not VIDEO_OCR_AVAILABLE:
@@ -553,6 +638,20 @@ class CaptchaSolver:
         except RuntimeError as exc:
             logger.warning("Tesseract timed out or failed: %s", exc)
             return ""
+
+    def clean_ai_ocr_text(self, text: str) -> Optional[str]:
+        compact = self.clean_ocr_text(text).replace("×", "*").replace("÷", "/")
+        expr_match = re.search(r"([0-9])\s*([+\-*/xX])\s*([0-9])\s*(?:=\s*\?)?", compact)
+        if expr_match:
+            left, operator, right = expr_match.groups()
+            operator = self.normalize_math_operator(operator)
+            return f"{left}{operator}{right}=?"
+
+        answer_match = re.search(r"-?[0-9]+(?:\.[0-9]+)?", compact)
+        if answer_match:
+            return answer_match.group(0)
+
+        return None
 
     def build_fast_math_ocr_variants(self, image):
         variants = []

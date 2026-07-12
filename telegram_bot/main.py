@@ -42,6 +42,9 @@ class TelegramCaptchaBot:
         logger.info("CAPTCHA_BOT_IDS=%s", sorted(self.captcha_config.bot_ids) or "all senders")
         logger.info("CAPTCHA_CLICK_DELAY=%ss", self.captcha_config.click_delay)
         logger.info("CAPTCHA_OCR=%s", self.captcha_config.ocr_enabled)
+        logger.info("CAPTCHA_AI_OCR=%s", self.captcha_config.ai_ocr_enabled)
+        logger.info("CAPTCHA_AI_MODE=%s", self.captcha_config.ai_mode)
+        logger.info("CAPTCHA_AI_MODEL=%s", self.captcha_config.ai_model)
 
         asyncio.create_task(self.print_stats_periodically())
         await self.client.run_until_disconnected()

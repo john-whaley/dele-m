@@ -101,14 +101,19 @@ async def verify_images(solver: CaptchaSolver, img_dir: Path) -> tuple[int, int]
         expected_problem = expected_image_problem(path)
         total += 1
         image = Image.open(path).convert("RGB")
-        result = solver.ocr_math_image(
-            image,
-            source=path.name,
-            expected_result=expected,
-            expected_expr=expected_problem["expr"] if expected_problem else None,
-        )
-        text = result[1] if result else None
         template_text = solver.recognize_math_with_templates(image)
+        if template_text:
+            text = template_text
+        else:
+            result = solver.ocr_math_image(
+                image,
+                source=path.name,
+                expected_result=expected,
+                expected_expr=expected_problem["expr"] if expected_problem else None,
+            )
+            text = result[1] if result else None
+            if text is None and solver.config.ai_ocr_enabled:
+                text = await solver.ai_ocr_image(path)
         problem = solver.extract_problem_from_text_sync(text or "")
         actual = format_problem_result(problem)
         actual_expr = parsed_expr(solver, text)
@@ -148,11 +153,24 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description="Verify OCR against viwers sample files.")
     parser.add_argument("--root", default="viwers", help="Sample root containing img/ and videos/ directories.")
     parser.add_argument("--debug", action="store_true", help="Enable OCR debug logging from solver.")
+    parser.add_argument("--ai", action="store_true", help="Use configured AI OCR as a fallback for image samples.")
     parser.add_argument("--include-videos", action="store_true", help="Also verify mp4/video samples. Disabled by default because it is slow.")
     args = parser.parse_args()
 
     root = Path(args.root)
-    solver = CaptchaSolver(SimpleNamespace(download_dir="downloads", ocr_enabled=True, debug=args.debug, click_delay=0))
+    solver = CaptchaSolver(SimpleNamespace(
+        download_dir="downloads",
+        ocr_enabled=True,
+        ai_ocr_enabled=args.ai,
+        ai_api_key=__import__("os").getenv("CAPTCHA_AI_API_KEY") or __import__("os").getenv("OPENAI_API_KEY"),
+        ai_base_url=__import__("os").getenv("CAPTCHA_AI_BASE_URL", "https://api.openai.com/v1/chat/completions"),
+        ai_model=__import__("os").getenv("CAPTCHA_AI_MODEL", "gpt-4o-mini"),
+        ai_prompt=__import__("os").getenv("CAPTCHA_AI_PROMPT", "图片中的公式及结果是多少？"),
+        ai_mode=__import__("os").getenv("CAPTCHA_AI_MODE", "fallback"),
+        ai_timeout=int(__import__("os").getenv("CAPTCHA_AI_TIMEOUT", "30")),
+        debug=args.debug,
+        click_delay=0,
+    ))
 
     image_passed = image_total = 0
     video_passed = video_total = 0

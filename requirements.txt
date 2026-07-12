@@ -3,3 +3,4 @@ python-dotenv>=1.0.1
 Pillow>=10.0.0
 pytesseract>=0.3.10
 opencv-python-headless>=4.10.0
+requests>=2.32.0

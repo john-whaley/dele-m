@@ -66,6 +66,13 @@ class CaptchaConfig:
     answer_timeout: int = 20
     click_delay: float = 15.0
     ocr_enabled: bool = False
+    ai_ocr_enabled: bool = False
+    ai_api_key: Optional[str] = None
+    ai_base_url: str = "https://api.openai.com/v1/chat/completions"
+    ai_model: str = "gpt-4o-mini"
+    ai_mode: str = "fallback"
+    ai_prompt: str = "图片中的公式及结果是多少？"
+    ai_timeout: int = 30
     download_dir: Path = Path("downloads")
     stats_interval: int = 60
 
@@ -85,6 +92,19 @@ class CaptchaConfig:
             config.trigger_keywords = keywords
 
         config.ocr_enabled = parse_bool("CAPTCHA_OCR", False)
+        config.ai_ocr_enabled = parse_bool("CAPTCHA_AI_OCR", False)
+        config.ai_api_key = os.getenv("CAPTCHA_AI_API_KEY") or os.getenv("OPENAI_API_KEY") or None
+        config.ai_base_url = os.getenv("CAPTCHA_AI_BASE_URL", config.ai_base_url)
+        config.ai_model = os.getenv("CAPTCHA_AI_MODEL", config.ai_model)
+        config.ai_mode = os.getenv("CAPTCHA_AI_MODE", config.ai_mode).strip().lower()
+        config.ai_prompt = os.getenv("CAPTCHA_AI_PROMPT", config.ai_prompt)
+        if config.ai_mode not in {"fallback", "always"}:
+            config.ai_mode = "fallback"
+
+        ai_timeout = os.getenv("CAPTCHA_AI_TIMEOUT")
+        if ai_timeout:
+            config.ai_timeout = int(ai_timeout)
+
         config.download_dir = Path(os.getenv("DOWNLOAD_DIR", "downloads"))
 
         timeout = os.getenv("CAPTCHA_TIMEOUT")
