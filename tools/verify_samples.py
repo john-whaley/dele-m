@@ -100,13 +100,15 @@ async def verify_images(solver: CaptchaSolver, img_dir: Path) -> tuple[int, int]
             continue
         expected_problem = expected_image_problem(path)
         total += 1
+        image = Image.open(path).convert("RGB")
         result = solver.ocr_math_image(
-            Image.open(path).convert("RGB"),
+            image,
             source=path.name,
             expected_result=expected,
             expected_expr=expected_problem["expr"] if expected_problem else None,
         )
         text = result[1] if result else None
+        template_text = solver.recognize_math_with_templates(image)
         problem = solver.extract_problem_from_text_sync(text or "")
         actual = format_problem_result(problem)
         actual_expr = parsed_expr(solver, text)
@@ -122,7 +124,7 @@ async def verify_images(solver: CaptchaSolver, img_dir: Path) -> tuple[int, int]
             f"IMG {path.name:12} expected={expected:>4} actual={str(actual):>4} "
             f"expected_expr={str(expected_problem['expr'] if expected_problem else None):>8} "
             f"actual_expr={str(actual_expr):>8} text={text!r} variants={variants!r} "
-            f"{'OK' if ok else 'FAIL'}{label_note}"
+            f"template={template_text!r} {'OK' if ok else 'FAIL'}{label_note}"
         )
     return passed, total
 

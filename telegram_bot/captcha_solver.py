@@ -10,12 +10,13 @@ from telethon.tl.types import Message, MessageMediaPhoto
 
 try:
     import pytesseract
-    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+    from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps
 
     OCR_AVAILABLE = True
 except ImportError:
     pytesseract = None
     Image = None
+    ImageChops = None
     ImageEnhance = None
     ImageFilter = None
     ImageOps = None
@@ -56,11 +57,14 @@ class CaptchaSolver:
         self.download_dir = Path(config.download_dir)
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.stats = {"total": 0, "success": 0, "failed": 0, "skipped": 0}
+        self.glyph_templates = {}
 
         if self.config.ocr_enabled and not OCR_AVAILABLE:
             logger.warning("CAPTCHA_OCR is enabled, but Pillow/pytesseract is not available")
         if self.config.ocr_enabled and not VIDEO_OCR_AVAILABLE:
             logger.info("Video OCR is unavailable because opencv-python-headless is not installed")
+        if OCR_AVAILABLE:
+            self.load_glyph_templates()
 
     async def handle_captcha(self, event: events.NewMessage.Event) -> bool:
         self.stats["total"] += 1
@@ -290,6 +294,10 @@ class CaptchaSolver:
 
         try:
             image = Image.open(image_path).convert("RGB")
+            template_text = self.recognize_math_with_templates(image)
+            if template_text:
+                logger.info("Template OCR text: %r", template_text)
+                return template_text
             result = self.ocr_math_image(image, source=image_path.name)
             return result[1] if result else None
         except Exception:
@@ -592,6 +600,216 @@ class CaptchaSolver:
 
     def is_video_path(self, path: Path) -> bool:
         return path.suffix.lower() in {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".gif"}
+
+    def load_glyph_templates(self) -> None:
+        sample_dir = Path("viwers") / "img"
+        if not sample_dir.exists():
+            return
+
+        templates: dict[str, list] = {}
+        for path in sorted(sample_dir.iterdir()):
+            if path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+                continue
+            labels = self.labels_from_sample_name(path.stem)
+            if not labels:
+                continue
+            try:
+                image = Image.open(path).convert("RGB")
+            except Exception:
+                continue
+            glyphs = self.extract_glyph_images(image)
+            if len(glyphs) != 5:
+                continue
+            for label, glyph in zip(labels, glyphs):
+                templates.setdefault(label, []).append(glyph)
+
+        self.glyph_templates = templates
+        if templates:
+            logger.info("Loaded glyph templates: %s", {key: len(value) for key, value in sorted(templates.items())})
+
+    def labels_from_sample_name(self, stem: str) -> list[str] | None:
+        match = re.fullmatch(r"([0-9])([+\-×÷*xX/])([0-9])=-?[0-9]+(?:\.[0-9]+)?", stem)
+        if not match:
+            return None
+        left, operator, right = match.groups()
+        return [left, self.normalize_math_operator(operator), right, "=", "?"]
+
+    def recognize_math_with_templates(self, image) -> Optional[str]:
+        if not self.glyph_templates:
+            return None
+        glyphs = self.extract_glyph_images(image)
+        if len(glyphs) != 5:
+            return None
+
+        allowed = [set("0123456789"), {"+", "-", "*", "/"}, set("0123456789"), {"="}, {"?"}]
+        labels = []
+        scores = []
+        for glyph, allowed_labels in zip(glyphs, allowed):
+            match = self.match_glyph_template(glyph, allowed_labels)
+            if not match:
+                return None
+            label, score = match
+            labels.append(label)
+            scores.append(score)
+
+        if max(scores[:3]) > 120:
+            return None
+        text = f"{labels[0]}{labels[1]}{labels[2]}=?"
+        if self.extract_fixed_digit_problem(text):
+            return text
+        return None
+
+    def extract_glyph_images(self, image) -> list:
+        mask = self.extract_blue_strokes(image) or self.extract_blue_difference(image)
+        if not mask:
+            return []
+        mask = self.crop_to_content(mask, margin=2)
+        projection_groups = self.group_mask_by_projection(mask, expected=5)
+        if len(projection_groups) == 5:
+            return [self.normalize_glyph(mask.crop(box)) for box in projection_groups]
+        components = self.connected_components(mask)
+        if not components:
+            return []
+        groups = self.group_components_into_glyphs(mask, components)
+        if len(groups) != 5:
+            return []
+        glyphs = []
+        for left, top, right, bottom in groups:
+            glyph = mask.crop((left, top, right, bottom))
+            glyphs.append(self.normalize_glyph(glyph))
+        return glyphs
+
+    def group_mask_by_projection(self, mask, expected: int) -> list[tuple[int, int, int, int]]:
+        width, height = mask.size
+        pixels = mask.load()
+        columns = []
+        for x in range(width):
+            count = 0
+            for y in range(height):
+                if pixels[x, y] < 245:
+                    count += 1
+            columns.append(count)
+
+        runs = []
+        start = None
+        for index, count in enumerate(columns):
+            if count > 0 and start is None:
+                start = index
+            elif count == 0 and start is not None:
+                if index - start >= 2:
+                    runs.append((start, index))
+                start = None
+        if start is not None and width - start >= 2:
+            runs.append((start, width))
+
+        if len(runs) != expected:
+            return []
+
+        boxes = []
+        for left, right in runs:
+            ys = [
+                y
+                for x in range(left, right)
+                for y in range(height)
+                if pixels[x, y] < 245
+            ]
+            if not ys:
+                return []
+            boxes.append(self.expand_box(mask, (left, min(ys), right, max(ys) + 1), margin=2))
+        return boxes
+
+    def connected_components(self, mask) -> list[tuple[int, int, int, int]]:
+        width, height = mask.size
+        pixels = mask.load()
+        visited = set()
+        components = []
+        for y in range(height):
+            for x in range(width):
+                if (x, y) in visited or pixels[x, y] >= 245:
+                    continue
+                stack = [(x, y)]
+                visited.add((x, y))
+                min_x = max_x = x
+                min_y = max_y = y
+                count = 0
+                while stack:
+                    cx, cy = stack.pop()
+                    count += 1
+                    min_x = min(min_x, cx)
+                    max_x = max(max_x, cx)
+                    min_y = min(min_y, cy)
+                    max_y = max(max_y, cy)
+                    for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+                        if nx < 0 or ny < 0 or nx >= width or ny >= height:
+                            continue
+                        if (nx, ny) in visited or pixels[nx, ny] >= 245:
+                            continue
+                        visited.add((nx, ny))
+                        stack.append((nx, ny))
+                if count >= 6:
+                    components.append((min_x, min_y, max_x + 1, max_y + 1))
+        return sorted(components)
+
+    def group_components_into_glyphs(self, mask, components: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
+        significant = []
+        for box in components:
+            left, top, right, bottom = box
+            if (right - left) * (bottom - top) >= 12:
+                significant.append(box)
+        if len(significant) < 5:
+            return []
+        significant.sort(key=lambda item: item[0])
+        if len(significant) == 5:
+            return [self.expand_box(mask, box) for box in significant]
+
+        centers = [(box[0] + box[2]) / 2 for box in significant]
+        gaps = [(centers[index + 1] - centers[index], index) for index in range(len(centers) - 1)]
+        split_indices = sorted(index for _, index in sorted(gaps, reverse=True)[:4])
+        parts = []
+        start = 0
+        for split_index in split_indices:
+            parts.append(significant[start:split_index + 1])
+            start = split_index + 1
+        parts.append(significant[start:])
+        boxes = []
+        for part in parts:
+            if not part:
+                return []
+            boxes.append(self.expand_box(mask, self.merge_boxes(part)))
+        return boxes
+
+    def merge_boxes(self, boxes: list[tuple[int, int, int, int]]) -> tuple[int, int, int, int]:
+        return (
+            min(box[0] for box in boxes),
+            min(box[1] for box in boxes),
+            max(box[2] for box in boxes),
+            max(box[3] for box in boxes),
+        )
+
+    def expand_box(self, image, box: tuple[int, int, int, int], margin: int = 2) -> tuple[int, int, int, int]:
+        left, top, right, bottom = box
+        return (
+            max(0, left - margin),
+            max(0, top - margin),
+            min(image.width, right + margin),
+            min(image.height, bottom + margin),
+        )
+
+    def normalize_glyph(self, glyph):
+        glyph = self.crop_to_content(glyph, margin=2)
+        glyph = glyph.resize((32, 32), self._resample_filter()).convert("L")
+        return glyph.point(lambda value: 0 if value < 180 else 255).convert("L")
+
+    def match_glyph_template(self, glyph, allowed_labels: set[str]) -> Optional[tuple[str, float]]:
+        best = None
+        for label in allowed_labels:
+            for template in self.glyph_templates.get(label, []):
+                diff = ImageChops.difference(glyph, template)
+                histogram = diff.histogram()
+                score = sum(value * count for value, count in enumerate(histogram)) / (glyph.width * glyph.height)
+                if best is None or score < best[1]:
+                    best = (label, score)
+        return best
 
     def build_ocr_variants(self, image):
         regions = [("full", image)]

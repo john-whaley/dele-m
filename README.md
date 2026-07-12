@@ -138,4 +138,4 @@ CAPTCHA_CLICK_DELAY=15
 python tools/verify_samples.py --root viwers
 ```
 
-其中 `viwers/img` 的期望答案取文件名前缀数字，`viwers/videos` 默认跳过。需要强行测试视频时可加 `--include-videos`。
+其中 `viwers/img` 建议用 `axb=c` 命名，例如 `9+6=15.jpg`、`4×5=20.jpg`、`0÷3=0.jpg`。程序会按图片里的 5 个字符位 `a x b = ?` 训练模板，但最终只用前三位 `a/x/b` 计算答案。这些样本既用于回归验证，也会在程序启动时作为模板训练集辅助识别。`viwers/videos` 默认跳过，需要强行测试视频时可加 `--include-videos`。
