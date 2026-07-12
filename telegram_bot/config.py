@@ -6,6 +6,9 @@ from typing import Optional
 from dotenv import load_dotenv
 
 
+DEFAULT_AI_PROMPT = "\u56fe\u7247\u4e2d\u7684\u516c\u5f0f\u53ca\u7ed3\u679c\u662f\u591a\u5c11\uff1f"
+
+
 def parse_csv(value: Optional[str]) -> list[str]:
     if not value:
         return []
@@ -57,10 +60,10 @@ class CaptchaConfig:
             "verify",
             "calculation result",
             "please select the calculation result",
-            "人机验证",
-            "请选择计算结果",
-            "完成验证",
-            "验证码",
+            "\u4eba\u673a\u9a8c\u8bc1",
+            "\u8bf7\u9009\u62e9\u8ba1\u7b97\u7ed3\u679c",
+            "\u5b8c\u6210\u9a8c\u8bc1",
+            "\u9a8c\u8bc1\u7801",
         ]
     )
     answer_timeout: int = 20
@@ -71,7 +74,7 @@ class CaptchaConfig:
     ai_base_url: str = "https://api.openai.com/v1/chat/completions"
     ai_model: str = "gpt-4o-mini"
     ai_mode: str = "fallback"
-    ai_prompt: str = "图片中的公式及结果是多少？"
+    ai_prompt: str = DEFAULT_AI_PROMPT
     ai_timeout: int = 30
     download_dir: Path = Path("downloads")
     stats_interval: int = 60

@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import os
 import re
 import sys
 from pathlib import Path
@@ -12,12 +13,13 @@ if str(PROJECT_ROOT) not in sys.path:
 from telegram_bot.captcha_solver import CaptchaSolver
 
 
+DEFAULT_AI_PROMPT = "\u56fe\u7247\u4e2d\u7684\u516c\u5f0f\u53ca\u7ed3\u679c\u662f\u591a\u5c11\uff1f"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".gif"}
 
 
 def normalize_operator(operator: str) -> str:
-    return {"×": "*", "÷": "/"}.get(operator, operator)
+    return {"\u00d7": "*", "\u00f7": "/", "x": "*", "X": "*"}.get(operator, operator)
 
 
 def eval_expr(left: int, operator: str, right: int) -> str | None:
@@ -37,16 +39,17 @@ def eval_expr(left: int, operator: str, right: int) -> str | None:
 
 
 def expected_image_problem(path: Path) -> dict[str, str] | None:
-    match = re.fullmatch(r"([0-9])([+\-*xX/×÷])([0-9])=(-?[0-9]+(?:\.[0-9]+)?)", path.stem)
+    match = re.fullmatch(r"([0-9])([+\-*/xX\u00d7\u00f7])([0-9])=(-?[0-9]+(?:\.[0-9]+)?)", path.stem)
     if not match:
         return None
     left, operator, right, result = match.groups()
+    operator = normalize_operator(operator)
     return {
         "left": left,
-        "operator": normalize_operator(operator),
+        "operator": operator,
         "right": right,
         "result": result,
-        "expr": f"{left}{normalize_operator(operator)}{right}={result}",
+        "expr": f"{left}{operator}{right}={result}",
         "computed": eval_expr(int(left), operator, int(right)) or "",
     }
 
@@ -114,6 +117,7 @@ async def verify_images(solver: CaptchaSolver, img_dir: Path) -> tuple[int, int]
             text = result[1] if result else None
             if text is None and solver.config.ai_ocr_enabled:
                 text = await solver.ai_ocr_image(path)
+
         problem = solver.extract_problem_from_text_sync(text or "")
         actual = format_problem_result(problem)
         actual_expr = parsed_expr(solver, text)
@@ -162,12 +166,12 @@ async def main() -> None:
         download_dir="downloads",
         ocr_enabled=True,
         ai_ocr_enabled=args.ai,
-        ai_api_key=__import__("os").getenv("CAPTCHA_AI_API_KEY") or __import__("os").getenv("OPENAI_API_KEY"),
-        ai_base_url=__import__("os").getenv("CAPTCHA_AI_BASE_URL", "https://api.openai.com/v1/chat/completions"),
-        ai_model=__import__("os").getenv("CAPTCHA_AI_MODEL", "gpt-4o-mini"),
-        ai_prompt=__import__("os").getenv("CAPTCHA_AI_PROMPT", "图片中的公式及结果是多少？"),
-        ai_mode=__import__("os").getenv("CAPTCHA_AI_MODE", "fallback"),
-        ai_timeout=int(__import__("os").getenv("CAPTCHA_AI_TIMEOUT", "30")),
+        ai_api_key=os.getenv("CAPTCHA_AI_API_KEY") or os.getenv("OPENAI_API_KEY"),
+        ai_base_url=os.getenv("CAPTCHA_AI_BASE_URL", "https://api.openai.com/v1/chat/completions"),
+        ai_model=os.getenv("CAPTCHA_AI_MODEL", "gpt-4o-mini"),
+        ai_prompt=os.getenv("CAPTCHA_AI_PROMPT", DEFAULT_AI_PROMPT),
+        ai_mode=os.getenv("CAPTCHA_AI_MODE", "fallback"),
+        ai_timeout=int(os.getenv("CAPTCHA_AI_TIMEOUT", "30")),
         debug=args.debug,
         click_delay=0,
     ))

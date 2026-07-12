@@ -330,6 +330,7 @@ class CaptchaSolver:
             ai_text = await self.ai_ocr_image(image_path)
             if ai_text:
                 return ai_text
+            return None
 
         local_text = None
         if self.config.ocr_enabled and OCR_AVAILABLE:
@@ -377,7 +378,7 @@ class CaptchaSolver:
             }],
         }
         response = requests.post(
-            self.config.ai_base_url,
+            self.ai_chat_completions_url(),
             headers={"Authorization": f"Bearer {self.config.ai_api_key}", "Content-Type": "application/json"},
             json=payload,
             timeout=self.config.ai_timeout,
@@ -388,6 +389,14 @@ class CaptchaSolver:
         if ai_text:
             logger.info("AI OCR text: %r", ai_text)
         return ai_text
+
+    def ai_chat_completions_url(self) -> str:
+        base_url = str(self.config.ai_base_url).strip().rstrip("/")
+        if base_url.endswith("/chat/completions"):
+            return base_url
+        if base_url.endswith("/v1"):
+            return f"{base_url}/chat/completions"
+        return f"{base_url}/v1/chat/completions"
 
     async def ocr_video_code(self, video_path: Path) -> Optional[str]:
         if not OCR_AVAILABLE or not VIDEO_OCR_AVAILABLE:
