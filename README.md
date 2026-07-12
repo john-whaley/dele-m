@@ -130,4 +130,4 @@ CAPTCHA_BOT_IDS=123456789
 CAPTCHA_CLICK_DELAY=15
 ```
 
-如果验证码题目在图片里，再把 `CAPTCHA_OCR=true` 打开。Dockerfile 已安装 `tesseract-ocr`，Python 依赖里也包含 `Pillow` 和 `pytesseract`。
+如果验证码题目在图片或动态视频里，再把 `CAPTCHA_OCR=true` 打开。图片验证码会按简单加减乘除算式处理，`.mp4` 等动态验证码会按 4 位字母数字码识别并匹配按钮文本。Dockerfile 已安装 `tesseract-ocr`，Python 依赖里也包含 `Pillow`、`pytesseract` 和 `opencv-python-headless`。修改 OCR 相关依赖后需要重新 `docker compose up -d --build`。

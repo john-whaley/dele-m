@@ -21,6 +21,14 @@ except ImportError:
     ImageOps = None
     OCR_AVAILABLE = False
 
+try:
+    import cv2
+
+    VIDEO_OCR_AVAILABLE = True
+except ImportError:
+    cv2 = None
+    VIDEO_OCR_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,6 +42,14 @@ class MathProblem:
     confidence: float = 1.0
 
 
+@dataclass
+class CaptchaAnswer:
+    kind: str
+    value: str | float
+    text: str
+    confidence: float = 1.0
+
+
 class CaptchaSolver:
     def __init__(self, config) -> None:
         self.config = config
@@ -43,6 +59,8 @@ class CaptchaSolver:
 
         if self.config.ocr_enabled and not OCR_AVAILABLE:
             logger.warning("CAPTCHA_OCR is enabled, but Pillow/pytesseract is not available")
+        if self.config.ocr_enabled and not VIDEO_OCR_AVAILABLE:
+            logger.info("Video OCR is unavailable because opencv-python-headless is not installed")
 
     async def handle_captcha(self, event: events.NewMessage.Event) -> bool:
         self.stats["total"] += 1
@@ -56,23 +74,17 @@ class CaptchaSolver:
                 self.stats["skipped"] += 1
                 return False
 
-            problem = await self.extract_problem(message)
-            if not problem:
-                logger.warning("Could not extract a math problem from message_id=%s", message.id)
+            answer = await self.extract_answer(message)
+            if not answer:
+                logger.warning("Could not extract a captcha answer from message_id=%s", message.id)
                 self.stats["failed"] += 1
                 return False
 
-            logger.info(
-                "Captcha problem: %s %s %s = %s",
-                self._format_number(problem.left),
-                problem.operator,
-                self._format_number(problem.right),
-                self._format_number(problem.result),
-            )
+            logger.info("Captcha answer kind=%s value=%s text=%r", answer.kind, answer.value, answer.text)
 
-            button_pos = await self.find_answer_button(message, problem.result)
+            button_pos = await self.find_answer_button(message, answer)
             if not button_pos:
-                logger.warning("No answer button found for result=%s", self._format_number(problem.result))
+                logger.warning("No answer button found for answer=%s", answer.value)
                 self.stats["failed"] += 1
                 return False
 
@@ -106,25 +118,40 @@ class CaptchaSolver:
 
         if message.media and isinstance(message.media, MessageMediaPhoto) and self.config.ocr_enabled:
             return True
+        if message.media and self.config.ocr_enabled:
+            return True
 
         return False
 
-    async def extract_problem(self, message: Message) -> Optional[MathProblem]:
+    async def extract_answer(self, message: Message) -> Optional[CaptchaAnswer]:
         if message.raw_text:
             problem = await self.extract_problem_from_text(message.raw_text)
             if problem:
-                return problem
+                return self.answer_from_problem(problem)
 
         if message.media and self.config.ocr_enabled and OCR_AVAILABLE:
             path = await message.download_media(file=str(self.download_dir / f"captcha_{message.id}"))
             if path:
                 logger.info("Downloaded captcha media: %s", path)
-                ocr_text = await self.ocr_image(Path(path))
-                if ocr_text:
-                    logger.info("OCR text: %r", ocr_text)
-                    return await self.extract_problem_from_text(ocr_text)
+                media_path = Path(path)
+                if self.is_video_path(media_path):
+                    code = await self.ocr_video_code(media_path)
+                    if code:
+                        logger.info("Video OCR code: %r", code)
+                        return CaptchaAnswer(kind="code", value=code, text=code)
+                else:
+                    ocr_text = await self.ocr_image(media_path)
+                    if ocr_text:
+                        logger.info("OCR text: %r", ocr_text)
+                        problem = await self.extract_problem_from_text(ocr_text)
+                        if problem:
+                            return self.answer_from_problem(problem)
 
         return None
+
+    def answer_from_problem(self, problem: MathProblem) -> CaptchaAnswer:
+        text = f"{self._format_number(problem.left)} {problem.operator} {self._format_number(problem.right)} = {self._format_number(problem.result)}"
+        return CaptchaAnswer(kind="math", value=problem.result, text=text, confidence=problem.confidence)
 
     async def extract_problem_from_text(self, text: str) -> Optional[MathProblem]:
         return self.extract_problem_from_text_sync(text)
@@ -202,40 +229,194 @@ class CaptchaSolver:
 
         try:
             image = Image.open(image_path).convert("RGB")
+            result = self.ocr_pil_image(image, source=image_path.name)
+            return result[1] if result else None
+        except Exception:
+            logger.exception("OCR failed")
+            return None
+
+    async def ocr_video_code(self, video_path: Path) -> Optional[str]:
+        if not OCR_AVAILABLE or not VIDEO_OCR_AVAILABLE:
+            return None
+
+        try:
+            capture = cv2.VideoCapture(str(video_path))
+            if not capture.isOpened():
+                logger.warning("Could not open captcha video: %s", video_path)
+                return None
+
+            frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            if frame_count <= 0:
+                frame_indices = list(range(16))
+            else:
+                samples = min(20, frame_count)
+                frame_indices = sorted({int(index * (frame_count - 1) / max(1, samples - 1)) for index in range(samples)})
+
             candidates: list[tuple[int, str, str, str]] = []
-            whitelist = "0123456789+-*/xX×÷=?SsZzOoTtIl|Bbgq"
-            configs = [
-                f"--oem 3 --psm 7 -c tessedit_char_whitelist={whitelist}",
-                f"--oem 3 --psm 8 -c tessedit_char_whitelist={whitelist}",
-                f"--oem 3 --psm 13 -c tessedit_char_whitelist={whitelist}",
-                f"--oem 3 --psm 6 -c tessedit_char_whitelist={whitelist}",
-            ]
+            for frame_index in frame_indices:
+                capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+                ok, frame = capture.read()
+                if not ok or frame is None:
+                    continue
 
-            for variant_name, variant in self.build_ocr_variants(image):
-                for config in configs:
-                    raw_text = pytesseract.image_to_string(variant, config=config)
-                    for clean_text in self.clean_ocr_text_variants(raw_text):
-                        candidates.append((self.score_ocr_text(clean_text), clean_text, variant_name, config))
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                image = Image.fromarray(rgb_frame)
+                candidates.extend(
+                    self.ocr_code_image_candidates(
+                        image,
+                        source=f"{video_path.name}:frame-{frame_index}",
+                    )
+                )
 
+            capture.release()
             if not candidates:
                 return None
 
-            candidates.sort(key=lambda item: item[0], reverse=True)
-            best_score, best_text, best_variant, best_config = candidates[0]
+            voted = self.vote_code_candidates(candidates)
+            if not voted:
+                return None
+            best_score, best_text, best_variant, best_config = voted
             if self.config.debug:
                 logger.info(
-                    "OCR best candidate score=%s variant=%s config=%s text=%r",
+                    "Video code OCR best candidate score=%s variant=%s config=%s text=%r",
                     best_score,
                     best_variant,
                     best_config,
                     best_text,
                 )
-                logger.info("OCR candidates: %s", [(score, text, variant) for score, text, variant, _ in candidates[:8]])
+                top = sorted(candidates, key=lambda item: item[0], reverse=True)[:12]
+                logger.info("Video code OCR candidates: %s", [(score, text, variant) for score, text, variant, _ in top])
 
             return best_text
         except Exception:
-            logger.exception("OCR failed")
+            logger.exception("Video code OCR failed")
             return None
+
+    def ocr_code_image_candidates(self, image, source: str) -> list[tuple[int, str, str, str]]:
+        candidates: list[tuple[int, str, str, str]] = []
+        whitelist = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        configs = [
+            f"--oem 3 --psm 7 -c tessedit_char_whitelist={whitelist}",
+            f"--oem 3 --psm 8 -c tessedit_char_whitelist={whitelist}",
+            f"--oem 3 --psm 13 -c tessedit_char_whitelist={whitelist}",
+            f"--oem 3 --psm 6 -c tessedit_char_whitelist={whitelist}",
+        ]
+
+        for variant_name, variant in self.build_code_ocr_variants(image.convert("RGB")):
+            for config in configs:
+                raw_text = pytesseract.image_to_string(variant, config=config)
+                for code in self.clean_code_text_variants(raw_text):
+                    candidates.append((self.score_code_text(code), code, f"{source}:{variant_name}", config))
+        return candidates
+
+    def vote_code_candidates(self, candidates: list[tuple[int, str, str, str]]) -> Optional[tuple[int, str, str, str]]:
+        grouped: dict[str, tuple[int, tuple[int, str, str, str]]] = {}
+        for candidate in candidates:
+            score, code, _, _ = candidate
+            total, best = grouped.get(code, (0, candidate))
+            if score > best[0]:
+                best = candidate
+            grouped[code] = (total + score, best)
+
+        if not grouped:
+            return None
+
+        code, (total_score, best_candidate) = max(grouped.items(), key=lambda item: (item[1][0], item[1][1][0]))
+        best_score, _, best_variant, best_config = best_candidate
+        return total_score + best_score, code, best_variant, best_config
+
+    def build_code_ocr_variants(self, image):
+        regions = [("full", image)]
+        if image.mode == "RGB":
+            for index, panel in enumerate(self.crop_light_panels(image)):
+                regions.insert(0, (f"panel-{index}", panel))
+
+        variants = []
+        for region_name, region in regions:
+            variants.extend(self.build_code_region_variants(region_name, region))
+            for angle in (-4, -2, 2, 4):
+                rotated = region.rotate(angle, expand=True, fillcolor=(255, 255, 255))
+                variants.extend(self.build_code_region_variants(f"{region_name}:rot{angle}", rotated))
+        return variants
+
+    def build_code_region_variants(self, region_name, image):
+        gray = image.convert("L")
+        scale = 6 if max(gray.size) < 260 else 4
+        resized = gray.resize((gray.width * scale, gray.height * scale), self._resample_filter())
+        contrasted = ImageOps.autocontrast(resized)
+        high_contrast = ImageEnhance.Contrast(contrasted).enhance(2.4)
+        sharpened = ImageEnhance.Sharpness(high_contrast).enhance(3.0).filter(ImageFilter.SHARPEN)
+
+        variants = [
+            (f"{region_name}:gray", self.add_ocr_border(resized)),
+            (f"{region_name}:contrast", self.add_ocr_border(contrasted)),
+            (f"{region_name}:high-contrast", self.add_ocr_border(high_contrast)),
+            (f"{region_name}:sharp", self.add_ocr_border(sharpened)),
+        ]
+
+        for threshold in (70, 90, 110, 130, 150, 170, 190, 210):
+            binary = sharpened.point(lambda value, t=threshold: 255 if value > t else 0, mode="1").convert("L")
+            variants.append((f"{region_name}:binary-{threshold}", self.add_ocr_border(binary)))
+            variants.append((f"{region_name}:invert-binary-{threshold}", self.add_ocr_border(ImageOps.invert(binary))))
+
+        return variants
+
+    def clean_code_text_variants(self, text: str) -> set[str]:
+        compact = re.sub(r"[^0-9A-Za-z]", "", text).upper()
+        if not compact:
+            return set()
+
+        codes = set()
+        if len(compact) == 4:
+            codes.add(compact)
+        if len(compact) > 4:
+            for index in range(0, len(compact) - 3):
+                codes.add(compact[index:index + 4])
+        return {code for code in codes if re.fullmatch(r"[0-9A-Z]{4}", code)}
+
+    def score_code_text(self, code: str) -> int:
+        if not re.fullmatch(r"[0-9A-Z]{4}", code):
+            return 0
+        score = 100
+        score += sum(8 for char in code if char.isdigit())
+        score += sum(8 for char in code if char.isalpha())
+        return score
+
+    def ocr_pil_image(self, image, source: str, log_candidates: bool = True) -> Optional[tuple[int, str, str, str]]:
+        candidates: list[tuple[int, str, str, str]] = []
+        whitelist = "0123456789+-*/xX×÷=?SsZzOoTtIl|Bbgq"
+        configs = [
+            f"--oem 3 --psm 7 -c tessedit_char_whitelist={whitelist}",
+            f"--oem 3 --psm 8 -c tessedit_char_whitelist={whitelist}",
+            f"--oem 3 --psm 13 -c tessedit_char_whitelist={whitelist}",
+            f"--oem 3 --psm 6 -c tessedit_char_whitelist={whitelist}",
+        ]
+
+        for variant_name, variant in self.build_ocr_variants(image.convert("RGB")):
+            for config in configs:
+                raw_text = pytesseract.image_to_string(variant, config=config)
+                for clean_text in self.clean_ocr_text_variants(raw_text):
+                    candidates.append((self.score_ocr_text(clean_text), clean_text, f"{source}:{variant_name}", config))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        best = candidates[0]
+        if self.config.debug and log_candidates:
+            best_score, best_text, best_variant, best_config = best
+            logger.info(
+                "OCR best candidate score=%s variant=%s config=%s text=%r",
+                best_score,
+                best_variant,
+                best_config,
+                best_text,
+            )
+            logger.info("OCR candidates: %s", [(score, text, variant) for score, text, variant, _ in candidates[:8]])
+        return best
+
+    def is_video_path(self, path: Path) -> bool:
+        return path.suffix.lower() in {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".gif"}
 
     def build_ocr_variants(self, image):
         regions = [("full", image)]
@@ -488,16 +669,19 @@ class CaptchaSolver:
     def _resample_filter(self):
         return getattr(getattr(Image, "Resampling", Image), "LANCZOS")
 
-    async def find_answer_button(self, message: Message, answer: float) -> Optional[tuple[int, int]]:
+    async def find_answer_button(self, message: Message, answer: CaptchaAnswer) -> Optional[tuple[int, int]]:
         if not message.buttons:
             return None
 
-        possible_answers = self._answer_variants(answer)
+        possible_answers = self._answer_variants(answer.value) if answer.kind == "math" else {str(answer.value).upper()}
         for row_index, row in enumerate(message.buttons):
             for col_index, button in enumerate(row):
                 raw_text = (button.text or "").strip()
-                clean_text = re.sub(r"[^\d.+-]", "", raw_text)
-                if raw_text in possible_answers or clean_text in possible_answers:
+                if answer.kind == "code":
+                    clean_text = re.sub(r"[^0-9A-Za-z]", "", raw_text).upper()
+                else:
+                    clean_text = re.sub(r"[^\d.+-]", "", raw_text)
+                if raw_text.upper() in possible_answers or clean_text in possible_answers:
                     return row_index, col_index
 
         return None
