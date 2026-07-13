@@ -20,6 +20,8 @@ services:
       CAPTCHA_AI_PROMPT: "图片中的公式及结果是多少？"
       CAPTCHA_AI_MODE: "fallback"
       CAPTCHA_AI_TIMEOUT: "30"
+      CAPTCHA_FALLBACK_GUESS: "false"
+      CAPTCHA_FALLBACK_MIN_CONFIDENCE: "0.7"
       DOWNLOAD_DIR: "/app/downloads"
     volumes:
       - ./downloads:/app/downloads

@@ -11,6 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from telegram_bot.captcha_solver import CaptchaSolver
+from telegram_bot.captcha_solver import MathProblem
 
 
 DEFAULT_AI_PROMPT = "\u56fe\u7247\u4e2d\u7684\u516c\u5f0f\u53ca\u7ed3\u679c\u662f\u591a\u5c11\uff1f"
@@ -39,11 +40,12 @@ def eval_expr(left: int, operator: str, right: int) -> str | None:
 
 
 def expected_image_problem(path: Path) -> dict[str, str] | None:
-    match = re.fullmatch(r"([0-9])([+\-*/xX\u00d7\u00f7])([0-9])=(-?[0-9]+(?:\.[0-9]+)?)", path.stem)
+    match = re.fullmatch(r"([0-9])([+\-*/xX\u00d7\u00f7])([0-9])=(?:-?[0-9]+(?:\.[0-9]+)?|[?\uff1f])", path.stem)
     if not match:
         return None
-    left, operator, right, result = match.groups()
+    left, operator, right = match.groups()
     operator = normalize_operator(operator)
+    result = eval_expr(int(left), operator, int(right)) or ""
     return {
         "left": left,
         "operator": operator,
@@ -91,7 +93,11 @@ def fixed_variants(solver: CaptchaSolver, text: str | None) -> str:
 
 
 async def verify_images(solver: CaptchaSolver, img_dir: Path) -> tuple[int, int]:
-    from PIL import Image
+    try:
+        from PIL import Image
+    except ImportError:
+        print("IMG skipped: Pillow is not installed")
+        return 0, 0
 
     total = 0
     passed = 0
@@ -153,11 +159,57 @@ async def verify_videos(solver: CaptchaSolver, video_dir: Path) -> tuple[int, in
     return passed, total
 
 
+async def verify_sure_fallback(solver: CaptchaSolver, sure_dir: Path) -> tuple[int, int]:
+    total = 0
+    passed = 0
+    for path in sorted(sure_dir.iterdir()):
+        if path.suffix.lower() not in IMAGE_EXTS:
+            continue
+        expected_problem = expected_image_problem(path)
+        if not expected_problem:
+            continue
+        total += 1
+        problem = MathProblem(
+            text=expected_problem["expr"],
+            left=float(expected_problem["left"]),
+            right=float(expected_problem["right"]),
+            operator=expected_problem["operator"],
+            result=float(expected_problem["result"]),
+        )
+        button_values = sample_button_values(problem, expected_problem["result"])
+        ranked = solver.rank_guess_candidates(problem, button_values)
+        actual = str(int(ranked[0][1])) if ranked else None
+        ok = actual == expected_problem["result"]
+        passed += int(ok)
+        top = [(round(score, 2), int(value), reason) for score, value, _, _, reason in ranked[:5]]
+        print(
+            f"SURE {path.name:12} expected={expected_problem['result']:>4} actual={str(actual):>4} "
+            f"expr={expected_problem['expr']:>8} top={top!r} {'OK' if ok else 'FAIL'}"
+        )
+    return passed, total
+
+
+def sample_button_values(problem: MathProblem, expected: str) -> list[tuple[int, int, float]]:
+    left = int(problem.left)
+    right = int(problem.right)
+    operator = normalize_operator(problem.operator)
+    expected_value = int(float(expected))
+    values = {expected_value}
+    seeds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 15, 18, 20, 21, 32, 36, 53, 81, 108, 128, 154, 160, 179]
+    for seed in seeds:
+        values.add(seed)
+        if len(values) >= 10:
+            break
+    ordered = sorted(values)[:10]
+    return [(index // 5, index % 5, float(value)) for index, value in enumerate(ordered)]
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Verify OCR against viwers sample files.")
     parser.add_argument("--root", default="viwers", help="Sample root containing img/ and videos/ directories.")
     parser.add_argument("--debug", action="store_true", help="Enable OCR debug logging from solver.")
     parser.add_argument("--ai", action="store_true", help="Use configured AI OCR as a fallback for image samples.")
+    parser.add_argument("--fallback-guess", action="store_true", help="Verify button-choice fallback rules against viwers/sure screenshots.")
     parser.add_argument("--include-videos", action="store_true", help="Also verify mp4/video samples. Disabled by default because it is slow.")
     args = parser.parse_args()
 
@@ -172,6 +224,8 @@ async def main() -> None:
         ai_prompt=os.getenv("CAPTCHA_AI_PROMPT", DEFAULT_AI_PROMPT),
         ai_mode=os.getenv("CAPTCHA_AI_MODE", "fallback"),
         ai_timeout=int(os.getenv("CAPTCHA_AI_TIMEOUT", "30")),
+        fallback_guess_enabled=os.getenv("CAPTCHA_FALLBACK_GUESS", "false").lower() in {"1", "true", "yes", "y", "on"},
+        fallback_guess_min_confidence=float(os.getenv("CAPTCHA_FALLBACK_MIN_CONFIDENCE", "0.7")),
         debug=args.debug,
         click_delay=0,
     ))
@@ -182,6 +236,13 @@ async def main() -> None:
     img_dir = root / "img"
     if img_dir.exists():
         image_passed, image_total = await verify_images(solver, img_dir)
+
+    if args.fallback_guess:
+        sure_dir = root / "sure"
+        if sure_dir.exists():
+            sure_passed, sure_total = await verify_sure_fallback(solver, sure_dir)
+            image_passed += sure_passed
+            image_total += sure_total
 
     video_dir = root / "videos"
     if args.include_videos and video_dir.exists():

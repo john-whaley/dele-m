@@ -80,6 +80,8 @@ docker compose logs -f
 - `CAPTCHA_KEYWORDS`: 触发关键词，逗号分隔
 - `CAPTCHA_CLICK_DELAY`: 找到答案按钮后等待多久再点击，单位秒，默认 `15`
 - `CAPTCHA_OCR`: 是否启用本地图片 OCR，默认 `false`
+- `CAPTCHA_FALLBACK_GUESS`: 当 OCR/AI 算出的答案没有匹配到按钮时，是否按按钮数字规则兜底猜测，默认 `false`
+- `CAPTCHA_FALLBACK_MIN_CONFIDENCE`: 兜底猜测最低可信度，默认 `0.7`
 - `DOWNLOAD_DIR`: 媒体下载目录
 - `STATS_INTERVAL`: 统计日志输出间隔，单位秒
 
@@ -107,6 +109,15 @@ CAPTCHA_AI_TIMEOUT: "30"
 
 AI 返回 `3+6=?` 或 `18` 都可以。程序会继续用解析结果去匹配消息按钮，不会直接乱点。
 
+如果 AI/OCR 的答案没有在按钮中找到，可以开启规则兜底：
+
+```yaml
+CAPTCHA_FALLBACK_GUESS: "true"
+CAPTCHA_FALLBACK_MIN_CONFIDENCE: "0.7"
+```
+
+兜底会根据已识别出的 `a x b` 和按钮数字排除不可能答案，例如负数、过大的位数、减法/除法大于左操作数、加法/乘法小于操作数等；可信度低于阈值时会跳过。
+
 `CAPTCHA_AI_PROMPT` 是发送图片时一并发送给 AI 的文字，默认是 `图片中的公式及结果是多少？`，你可以按自己的接口习惯改成更严格的提示词。
 
 `CAPTCHA_AI_BASE_URL` 可以填完整地址，例如 `https://.../v1/chat/completions`；也可以只填到 `https://.../v1`，程序会自动补成 `/chat/completions`。
@@ -131,6 +142,12 @@ python tools/verify_samples.py --root viwers
 
 ```bash
 python tools/verify_samples.py --root viwers --ai
+```
+
+测试 `viwers/sure` 里的按钮兜底规则：
+
+```bash
+python tools/verify_samples.py --root viwers --fallback-guess
 ```
 
 视频样本默认跳过；如需强制测试视频，添加 `--include-videos`。当前线上处理仍会跳过 `.mp4` 验证码。

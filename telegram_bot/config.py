@@ -76,6 +76,8 @@ class CaptchaConfig:
     ai_mode: str = "fallback"
     ai_prompt: str = DEFAULT_AI_PROMPT
     ai_timeout: int = 30
+    fallback_guess_enabled: bool = False
+    fallback_guess_min_confidence: float = 0.7
     download_dir: Path = Path("downloads")
     stats_interval: int = 60
 
@@ -107,6 +109,11 @@ class CaptchaConfig:
         ai_timeout = os.getenv("CAPTCHA_AI_TIMEOUT")
         if ai_timeout:
             config.ai_timeout = int(ai_timeout)
+
+        config.fallback_guess_enabled = parse_bool("CAPTCHA_FALLBACK_GUESS", False)
+        guess_confidence = os.getenv("CAPTCHA_FALLBACK_MIN_CONFIDENCE")
+        if guess_confidence:
+            config.fallback_guess_min_confidence = float(guess_confidence)
 
         config.download_dir = Path(os.getenv("DOWNLOAD_DIR", "downloads"))
 

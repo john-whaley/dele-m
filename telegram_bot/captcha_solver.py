@@ -59,6 +59,7 @@ class CaptchaAnswer:
     value: str | float
     text: str
     confidence: float = 1.0
+    problem: Optional[MathProblem] = None
 
 
 class CaptchaSolver:
@@ -101,6 +102,8 @@ class CaptchaSolver:
             logger.info("Captcha answer kind=%s value=%s text=%r", answer.kind, answer.value, answer.text)
 
             button_pos = await self.find_answer_button(message, answer)
+            if not button_pos and self.config.fallback_guess_enabled:
+                button_pos = self.guess_answer_button(message, answer)
             if not button_pos:
                 logger.warning("No answer button found for answer=%s", answer.value)
                 self.stats["failed"] += 1
@@ -169,7 +172,7 @@ class CaptchaSolver:
 
     def answer_from_problem(self, problem: MathProblem) -> CaptchaAnswer:
         text = f"{self._format_number(problem.left)} {problem.operator} {self._format_number(problem.right)} = {self._format_number(problem.result)}"
-        return CaptchaAnswer(kind="math", value=problem.result, text=text, confidence=problem.confidence)
+        return CaptchaAnswer(kind="math", value=problem.result, text=text, confidence=problem.confidence, problem=problem)
 
     def extract_direct_answer(self, text: str) -> Optional[float]:
         match = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*", text)
@@ -1187,6 +1190,117 @@ class CaptchaSolver:
                     return row_index, col_index
 
         return None
+
+    def guess_answer_button(self, message: Message, answer: CaptchaAnswer) -> Optional[tuple[int, int]]:
+        if answer.kind != "math" or not answer.problem or not message.buttons:
+            return None
+
+        button_values = self.extract_numeric_buttons(message)
+        if not button_values:
+            return None
+
+        ranked = self.rank_guess_candidates(answer.problem, button_values)
+        if not ranked:
+            return None
+
+        best = ranked[0]
+        if best[0] < self.config.fallback_guess_min_confidence:
+            logger.info(
+                "Fallback guess skipped: confidence %.2f below %.2f candidates=%s",
+                best[0],
+                self.config.fallback_guess_min_confidence,
+                [(round(score, 2), value, row, col, reason) for score, value, row, col, reason in ranked[:5]],
+            )
+            return None
+
+        score, value, row, col, reason = best
+        logger.warning(
+            "Using fallback guess button [%s][%s]=%s confidence=%.2f reason=%s",
+            row,
+            col,
+            self._format_number(value),
+            score,
+            reason,
+        )
+        return row, col
+
+    def extract_numeric_buttons(self, message: Message) -> list[tuple[int, int, float]]:
+        values = []
+        for row_index, row in enumerate(message.buttons or []):
+            for col_index, button in enumerate(row):
+                raw_text = (button.text or "").strip()
+                match = re.fullmatch(r"-?\d+(?:\.\d+)?", re.sub(r"[^\d.+-]", "", raw_text))
+                if match:
+                    values.append((row_index, col_index, float(match.group(0))))
+        return values
+
+    def rank_guess_candidates(
+        self,
+        problem: MathProblem,
+        button_values: list[tuple[int, int, float]],
+    ) -> list[tuple[float, float, int, int, str]]:
+        left = int(problem.left)
+        right = int(problem.right)
+        operator = self.normalize_math_operator(problem.operator)
+        candidates = []
+        for row, col, value in button_values:
+            score, reason = self.score_guess_value(left, right, operator, value)
+            if score > 0:
+                candidates.append((score, value, row, col, reason))
+        return sorted(candidates, key=lambda item: (-item[0], item[1], item[2], item[3]))
+
+    def score_guess_value(self, left: int, right: int, operator: str, value: float) -> tuple[float, str]:
+        if value < 0 or not float(value).is_integer():
+            return 0.0, "negative-or-decimal"
+        number = int(value)
+        if number >= 100:
+            return 0.0, "three-or-more-digits"
+        if operator in {"-", "/"} and number >= 10:
+            return 0.0, "minus-divide-two-or-more-digits"
+        if operator in {"-", "/"} and number > left:
+            return 0.0, "minus-divide-greater-than-left"
+        if operator in {"+", "*"} and number < min(left, right):
+            return 0.0, "plus-multiply-less-than-operands"
+
+        exact = self.calculate(left, right, operator)
+        if exact is not None and float(exact).is_integer() and number == int(exact):
+            return 1.0, "exact-math"
+
+        score = 0.2
+        reasons = ["possible"]
+        if number <= 9:
+            score += 0.25
+            reasons.append("single-digit")
+        elif number <= 20:
+            score += 0.15
+            reasons.append("small")
+
+        if operator == "+":
+            if number >= max(left, right):
+                score += 0.2
+                reasons.append("plus-range")
+            if number <= 18:
+                score += 0.15
+                reasons.append("plus-max")
+        elif operator == "*":
+            if left == 0 or right == 0:
+                score += 0.2 if number == 0 else -0.2
+            if number >= max(left, right):
+                score += 0.15
+                reasons.append("multiply-range")
+            if number <= 81:
+                score += 0.1
+                reasons.append("multiply-max")
+        elif operator == "-":
+            if 0 <= number <= left:
+                score += 0.25
+                reasons.append("minus-range")
+        elif operator == "/":
+            if right != 0 and 0 <= number <= left:
+                score += 0.25
+                reasons.append("divide-range")
+
+        return max(0.0, min(score, 0.95)), "+".join(reasons)
 
     async def print_debug_message(self, event: events.NewMessage.Event) -> None:
         sender = await event.get_sender()
