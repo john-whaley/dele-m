@@ -102,6 +102,16 @@ class CaptchaSolver:
             logger.info("Captcha answer kind=%s value=%s text=%r", answer.kind, answer.value, answer.text)
 
             button_pos = await self.find_answer_button(message, answer)
+            if not button_pos:
+                corrected_answer = self.correct_answer_with_button_context(message, answer)
+                if corrected_answer:
+                    logger.info(
+                        "Corrected captcha answer from %r to %r using button context",
+                        answer.text,
+                        corrected_answer.text,
+                    )
+                    answer = corrected_answer
+                    button_pos = await self.find_answer_button(message, answer)
             if not button_pos and self.config.fallback_guess_enabled:
                 button_pos = self.guess_answer_button(message, answer)
             if not button_pos:
@@ -1190,6 +1200,55 @@ class CaptchaSolver:
                     return row_index, col_index
 
         return None
+
+    def correct_answer_with_button_context(self, message: Message, answer: CaptchaAnswer) -> Optional[CaptchaAnswer]:
+        if answer.kind != "math" or not answer.problem or not message.buttons:
+            return None
+
+        for problem in self.confused_digit_problem_variants(answer.problem):
+            corrected = self.answer_from_problem(problem)
+            if self.answer_value_exists_in_buttons(message, corrected.value):
+                corrected.confidence = max(corrected.confidence, 0.95)
+                return corrected
+        return None
+
+    def confused_digit_problem_variants(self, problem: MathProblem) -> list[MathProblem]:
+        operator = self.normalize_math_operator(problem.operator)
+        if not float(problem.left).is_integer() or not float(problem.right).is_integer():
+            return []
+        left = int(problem.left)
+        right = int(problem.right)
+        replacements = {1: 7, 7: 1}
+        variants = []
+        seen = set()
+        for new_left, new_right, reason in (
+            (replacements.get(left, left), right, "left-1-7"),
+            (left, replacements.get(right, right), "right-1-7"),
+            (replacements.get(left, left), replacements.get(right, right), "both-1-7"),
+        ):
+            key = (new_left, new_right)
+            if key == (left, right) or key in seen:
+                continue
+            seen.add(key)
+            result = self.calculate(float(new_left), float(new_right), operator)
+            if result is None or result < 0 or not float(result).is_integer() or result >= 100:
+                continue
+            variants.append(MathProblem(
+                text=f"{new_left}{operator}{new_right}=? ({reason})",
+                left=float(new_left),
+                right=float(new_right),
+                operator=operator,
+                result=float(result),
+                confidence=0.95,
+            ))
+        return variants
+
+    def answer_value_exists_in_buttons(self, message: Message, value: str | float) -> bool:
+        possible_answers = self._answer_variants(value)
+        for _, _, button_value in self.extract_numeric_buttons(message):
+            if self._format_number(button_value) in possible_answers:
+                return True
+        return False
 
     def guess_answer_button(self, message: Message, answer: CaptchaAnswer) -> Optional[tuple[int, int]]:
         if answer.kind != "math" or not answer.problem or not message.buttons:
