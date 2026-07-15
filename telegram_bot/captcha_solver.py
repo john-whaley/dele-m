@@ -1221,11 +1221,15 @@ class CaptchaSolver:
         replacements = {1: 7, 7: 1}
         variants = []
         seen = set()
-        for new_left, new_right, reason in (
+        candidate_digits = [
             (replacements.get(left, left), right, "left-1-7"),
             (left, replacements.get(right, right), "right-1-7"),
             (replacements.get(left, left), replacements.get(right, right), "both-1-7"),
-        ):
+        ]
+        if right == 2:
+            candidate_digits.insert(0, (left, 1, "right-2-as-1-plus-equals"))
+
+        for new_left, new_right, reason in candidate_digits:
             key = (new_left, new_right)
             if key == (left, right) or key in seen:
                 continue
